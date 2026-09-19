@@ -8,16 +8,21 @@ export const dynamic = 'force-dynamic';
 
 export async function GET(req: NextRequest) {
   try {
+    const requestedRole = req.nextUrl.searchParams.get('role');
+    const targetRole = requestedRole === 'OWNER' ? UserRole.OWNER : UserRole.TENANT;
+
     let authContext = await getAuthenticatedUser();
 
-    if (!authContext?.userProfile) {
-      const demoTenant = await prisma.userProfile.findFirst({
-        where: { role: UserRole.TENANT },
+    // In demo environment or if switching persona via query parameter:
+    if (!authContext?.userProfile || (requestedRole && authContext.userProfile.role !== targetRole)) {
+      const demoUser = await prisma.userProfile.findFirst({
+        where: { role: targetRole },
+        include: { tenant: true, owner: true },
       });
-      if (demoTenant) {
+      if (demoUser) {
         authContext = {
-          userProfile: demoTenant,
-          supabaseUser: { id: demoTenant.authUserId, email: demoTenant.email },
+          userProfile: demoUser,
+          supabaseUser: { id: demoUser.authUserId, email: demoUser.email },
         };
       }
     }
@@ -31,6 +36,7 @@ export async function GET(req: NextRequest) {
     let tenancy: any = null;
     let rentSchedule: any = null;
     let recentIssues: any[] = [];
+    let portfolio: any = null;
 
     if (userProfile.role === UserRole.TENANT) {
       const tenant = await prisma.tenant.findUnique({
@@ -66,6 +72,104 @@ export async function GET(req: NextRequest) {
         rentSchedule = tenancy.rentSchedules[0] || null;
         recentIssues = tenancy.maintenanceIssues || [];
       }
+    } else if (userProfile.role === UserRole.OWNER || userProfile.role === UserRole.ADMIN) {
+      const owner = await prisma.owner.findUnique({
+        where: { userProfileId: userProfile.id },
+        include: {
+          properties: {
+            include: {
+              rooms: true,
+              tenancies: {
+                where: { isActive: true },
+                include: {
+                  room: true,
+                  tenant: { include: { userProfile: true } },
+                  rentSchedules: { orderBy: { dueDate: 'desc' }, take: 1 },
+                },
+              },
+              maintenanceIssues: {
+                orderBy: { createdAt: 'desc' },
+                take: 10,
+              },
+            },
+          },
+        },
+      });
+
+      if (owner && owner.properties.length > 0) {
+        let totalRooms = 0;
+        let occupiedRooms = 0;
+        let expectedMonthlyRent = 0;
+        let collectedRent = 0;
+        let pendingRent = 0;
+        let activeMaintenanceCount = 0;
+
+        const propertiesSummary = owner.properties.map((p) => {
+          const pRooms = p.rooms.length;
+          const pOccupied = p.rooms.filter((r) => r.isOccupied).length;
+          totalRooms += pRooms;
+          occupiedRooms += pOccupied;
+
+          p.tenancies.forEach((t) => {
+            expectedMonthlyRent += t.monthlyRent;
+            const rs = t.rentSchedules[0];
+            if (rs) {
+              if (rs.status === 'SUCCESS') {
+                collectedRent += rs.amount;
+              } else {
+                pendingRent += rs.amount;
+              }
+            }
+          });
+
+          const pActiveIssues = p.maintenanceIssues.filter(
+            (m) => !['RESOLVED', 'CLOSED'].includes(m.status)
+          ).length;
+          activeMaintenanceCount += pActiveIssues;
+
+          return {
+            id: p.id,
+            name: p.name,
+            address: `${p.address}, ${p.city}`,
+            totalRooms: pRooms,
+            occupiedRooms: pOccupied,
+            occupancyRate: pRooms > 0 ? Math.round((pOccupied / pRooms) * 100) : 0,
+          };
+        });
+
+        const vacantRooms = Math.max(0, totalRooms - occupiedRooms);
+        const occupancyRate = totalRooms > 0 ? Math.round((occupiedRooms / totalRooms) * 100) : 0;
+
+        portfolio = {
+          totalProperties: owner.properties.length,
+          totalRooms,
+          occupiedRooms,
+          vacantRooms,
+          occupancyRate,
+          expectedMonthlyRent,
+          collectedRent,
+          pendingRent,
+          activeMaintenanceCount,
+          propertiesSummary,
+        };
+
+        // All cross-property active maintenance issues for owner
+        const allIssues: any[] = [];
+        owner.properties.forEach((p) => {
+          p.maintenanceIssues.forEach((i) => {
+            allIssues.push({
+              id: i.id,
+              title: i.title,
+              propertyName: p.name,
+              category: i.category,
+              priority: i.priority,
+              status: i.status,
+              createdAt: i.createdAt.toISOString(),
+            });
+          });
+        });
+        recentIssues = allIssues.slice(0, 5);
+      }
     }
 
     return NextResponse.json({
@@ -78,6 +182,7 @@ export async function GET(req: NextRequest) {
         email: userProfile.email,
         role: userProfile.role,
       },
+      portfolio,
       tenancy: tenancy
         ? {
             id: tenancy.id,
@@ -104,10 +209,11 @@ export async function GET(req: NextRequest) {
       recentIssues: recentIssues.map((i) => ({
         id: i.id,
         title: i.title,
+        propertyName: i.propertyName,
         category: i.category,
         priority: i.priority,
         status: i.status,
-        createdAt: i.createdAt.toISOString(),
+        createdAt: typeof i.createdAt === 'string' ? i.createdAt : i.createdAt?.toISOString?.() || new Date().toISOString(),
       })),
     });
   } catch (err: any) {

@@ -207,15 +207,22 @@ export class MemoryService {
   }
 
   /**
-   * Retrieves stored rental memories by user, tenancy, or type.
+   * Retrieves stored rental memories by user, tenancy, property, or type.
    */
-  async retrieve(params: RetrieveParams): Promise<MemoryRecord[]> {
-    const { userProfileId, tenancyId, memoryTypes, limit = 20 } = params;
+  async retrieve(params: RetrieveParams & { propertyId?: string }): Promise<MemoryRecord[]> {
+    const { userProfileId, tenancyId, propertyId, memoryTypes, limit = 50 } = params;
 
-    const whereClause: any = { userProfileId };
+    const orConditions: any[] = [{ userProfileId }];
     if (tenancyId) {
-      whereClause.OR = [{ tenancyId }, { tenancyId: null }];
+      orConditions.push({ tenancyId });
     }
+    if (propertyId) {
+      orConditions.push({ propertyId });
+    }
+
+    const whereClause: any = {
+      OR: orConditions,
+    };
     if (memoryTypes && memoryTypes.length > 0) {
       whereClause.memoryType = { in: memoryTypes };
     }
@@ -244,8 +251,8 @@ export class MemoryService {
   /**
    * Searches relevant memories using semantic relevance (via Cognee API or keyword ranking).
    */
-  async search(params: SearchParams): Promise<Array<MemoryRecord & { score: number }>> {
-    const { userProfileId, tenancyId, query, limit = 5 } = params;
+  async search(params: SearchParams & { propertyId?: string }): Promise<Array<MemoryRecord & { score: number }>> {
+    const { userProfileId, tenancyId, propertyId, query, limit = 8 } = params;
     const apiKey = getCogneeApiKey();
 
     // Try Cognee API Search
@@ -272,6 +279,7 @@ export class MemoryService {
               id: r.id || `cognee-${Date.now()}`,
               userProfileId,
               tenancyId,
+              propertyId,
               memoryType: r.memoryType || 'INTERACTION_SUMMARY',
               key: r.key,
               summary: r.summary || r.text,
@@ -288,8 +296,8 @@ export class MemoryService {
       }
     }
 
-    // Local semantic scoring fallback
-    const allMemories = await this.retrieve({ userProfileId, tenancyId, limit: 50 });
+    // Local semantic scoring fallback across user, tenancy, and property
+    const allMemories = await this.retrieve({ userProfileId, tenancyId, propertyId, limit: 100 });
     const queryTokens = query
       .toLowerCase()
       .split(/\W+/)
@@ -380,16 +388,46 @@ export class MemoryService {
   async retrieveRelevantContext(params: {
     userProfileId: string;
     tenancyId?: string;
+    propertyId?: string;
     userMessage: string;
   }): Promise<RelevantContextResult> {
-    const { userProfileId, tenancyId, userMessage } = params;
+    const { userProfileId, userMessage } = params;
+    let tenancyId = params.tenancyId;
+    let propertyId = params.propertyId;
 
-    // Search memories matching user query
+    // Resolve propertyId if not explicitly passed
+    if (!propertyId && tenancyId) {
+      const ten = await prisma.tenancy.findUnique({
+        where: { id: tenancyId },
+        select: { propertyId: true },
+      });
+      if (ten) propertyId = ten.propertyId;
+    } else if (!propertyId) {
+      const tenant = await prisma.tenant.findUnique({
+        where: { userProfileId },
+        include: { tenancies: { where: { isActive: true }, select: { id: true, propertyId: true }, take: 1 } },
+      });
+      if (tenant?.tenancies[0]) {
+        tenancyId = tenancyId || tenant.tenancies[0].id;
+        propertyId = tenant.tenancies[0].propertyId;
+      } else {
+        const owner = await prisma.owner.findUnique({
+          where: { userProfileId },
+          include: { properties: { select: { id: true }, take: 1 } },
+        });
+        if (owner?.properties[0]) {
+          propertyId = owner.properties[0].id;
+        }
+      }
+    }
+
+    // Search memories matching user query across user, tenancy, and property
     const searchResults = await this.search({
       userProfileId,
       tenancyId,
+      propertyId,
       query: userMessage,
-      limit: 5,
+      limit: 8,
     });
 
     // Detect if message mentions recurring or specific maintenance items
