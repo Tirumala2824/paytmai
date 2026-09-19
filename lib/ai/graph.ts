@@ -9,17 +9,20 @@ import {
   DetectedIntent,
   MultiIntentExecutionStatus,
   PendingConfirmation,
+  ChatTurn,
 } from './types';
 import { AI_TOOLS_REGISTRY } from './tools';
 import {
   dynamicAnalyzeMultiIntents,
   dynamicSynthesizeResponse,
+  generateContextualFollowUps,
 } from './llm';
 import { memoryService } from './memory/service';
 import { createAuditEvent } from '@/lib/audit/service';
 import { canAccessProperty, canAccessTenancy } from '@/lib/auth/abac';
 import { advanceRentalLifecycle } from '@/lib/rental/service';
 import { evaluateRagResponse, RagEvaluationResult } from './rag/evaluator';
+import { kcache } from './cache/kcache';
 
 /**
  * Define the LangGraph State Annotation for Phase 3
@@ -78,6 +81,14 @@ export const AgentStateAnnotation = Annotation.Root({
   userResponse: Annotation<string>(),
   modelName: Annotation<string | undefined>(),
   ragEvaluation: Annotation<RagEvaluationResult | undefined>(),
+  conversationHistory: Annotation<ChatTurn[]>({
+    reducer: (curr, next) => (next && next.length > 0 ? next : curr),
+    default: () => [],
+  }),
+  suggestedFollowUps: Annotation<string[]>({
+    reducer: (curr, next) => (next && next.length > 0 ? next : curr),
+    default: () => [],
+  }),
 });
 
 export type AgentStateType = typeof AgentStateAnnotation.State;
@@ -309,6 +320,7 @@ export async function loadContextNode(state: AgentStateType): Promise<Partial<Ag
     previousRelatedIssue: prevIssue,
     isRepeatedIssue: hasPreviousIssue,
     portfolio: portfolioSummary,
+    conversationHistory: state.conversationHistory,
   };
 
   const stepDetails = portfolioSummary
@@ -343,8 +355,12 @@ export async function loadContextNode(state: AgentStateType): Promise<Partial<Ag
 export async function detectIntentsNode(state: AgentStateType): Promise<Partial<AgentStateType>> {
   const message = state.userMessage.toLowerCase().trim();
 
-  // 1. Try dynamic multi-intent analysis via Gemini if configured
-  const dynamicResult = await dynamicAnalyzeMultiIntents(state.userMessage, state.modelName);
+  // 1. Try dynamic multi-intent analysis via Gemini with conversation history context
+  const dynamicResult = await dynamicAnalyzeMultiIntents(
+    state.userMessage,
+    state.modelName,
+    state.conversationHistory
+  );
   if (dynamicResult && dynamicResult.intents.length > 0) {
     const primaryIntent = dynamicResult.intents[0].intent;
     const mergedEntities = dynamicResult.intents.reduce(
@@ -673,11 +689,25 @@ export async function detectIntentsNode(state: AgentStateType): Promise<Partial<
     message.includes('about nexus') ||
     message.includes('about cybercity');
 
-  if (hasKnowledgeQuery) {
+  // KCache Follow-up Topic Resolution
+  const activeCtx = state.sessionId ? kcache.getActiveContext(state.sessionId) : undefined;
+  const lastUserMsg = state.conversationHistory?.slice(-2).find(t => t.role === 'user')?.content.toLowerCase() || '';
+
+  const isWifiFollowUp =
+    !hasKnowledgeQuery &&
+    (activeCtx?.activeTopic === 'WIFI' || lastUserMsg.includes('wifi') || lastUserMsg.includes('wi-fi')) &&
+    (message.includes('password') || message.includes('repeat') || message.includes('again') || message.includes('network') || message.includes('name') || message.includes('ssid') || message.includes('what was') || message.includes('what is it'));
+
+  const isMessFollowUp =
+    !hasKnowledgeQuery &&
+    (activeCtx?.activeTopic === 'MESS_TIMINGS' || lastUserMsg.includes('mess') || lastUserMsg.includes('food')) &&
+    (message.includes('timing') || message.includes('time') || message.includes('repeat') || message.includes('again') || message.includes('food') || message.includes('dinner') || message.includes('lunch'));
+
+  if (hasKnowledgeQuery || isWifiFollowUp || isMessFollowUp) {
     let category = 'ALL';
-    if (message.includes('wifi') || message.includes('wi-fi') || message.includes('password') || message.includes('internet')) {
+    if (isWifiFollowUp || message.includes('wifi') || message.includes('wi-fi') || message.includes('password') || message.includes('internet')) {
       category = 'WIFI';
-    } else if (message.includes('mess') || message.includes('food') || message.includes('dinner') || message.includes('lunch') || message.includes('breakfast') || message.includes('meal')) {
+    } else if (isMessFollowUp || message.includes('mess') || message.includes('food') || message.includes('dinner') || message.includes('lunch') || message.includes('breakfast') || message.includes('meal')) {
       category = 'MESS';
     } else if (message.includes('rule') || message.includes('gate') || message.includes('curfew') || message.includes('visitor') || message.includes('guest')) {
       category = 'RULES';
@@ -686,13 +716,39 @@ export async function detectIntentsNode(state: AgentStateType): Promise<Partial<
     }
 
     entities.category = category;
-    entities.query = state.userMessage;
+    entities.query = isWifiFollowUp ? 'wifi password network' : isMessFollowUp ? 'mess timings food' : state.userMessage;
 
     detectedIntents.push({
       intent: 'PROPERTY_INFORMATION',
       confidence: 0.96,
-      entities: { category, query: state.userMessage },
+      entities: { category, query: entities.query },
     });
+  }
+
+  // Follow-up resolution for owner notification or maintenance status
+  if (detectedIntents.length === 0 && activeCtx) {
+    if (message.includes('tell owner') || message.includes('notify owner') || message.includes('tell the owner') || message.includes('let the owner know')) {
+      const issueMsg = activeCtx.activeAppliance
+        ? `Tenant requested update for ${activeCtx.activeAppliance} issue`
+        : 'Tenant requested owner notification regarding recent request';
+      detectedIntents.push({
+        intent: 'OWNER_NOTIFICATION',
+        confidence: 0.95,
+        entities: { message: issueMsg, urgent: true, issueId: activeCtx.activeIssueId },
+      });
+    } else if (activeCtx.activeIssueId && (message.includes('status') || message.includes('progress') || message.includes('technician') || message.includes('when will') || message.includes('update'))) {
+      detectedIntents.push({
+        intent: 'MAINTENANCE_STATUS',
+        confidence: 0.95,
+        entities: { issueId: activeCtx.activeIssueId },
+      });
+    } else if (activeCtx.activeTopic === 'WIFI') {
+      detectedIntents.push({
+        intent: 'PROPERTY_INFORMATION',
+        confidence: 0.9,
+        entities: { category: 'WIFI', query: 'wifi password' },
+      });
+    }
   }
 
   // Default fallback if no intent detected
@@ -1030,8 +1086,25 @@ export async function executeNode(state: AgentStateType): Promise<Partial<AgentS
       }
     }
 
+    // KCache lookaside for knowledge queries
+    if (toolName === 'searchKnowledgeBase') {
+      const cached = kcache.getCachedKnowledge(input.query, input.propertyId, input.category);
+      if (cached && cached.length > 0) {
+        return {
+          toolName: 'searchKnowledgeBase',
+          status: 'SUCCESS',
+          input,
+          output: { results: cached, count: cached.length, source: 'KCACHE' },
+          summary: `Retrieved ${cached.length} knowledge items from KCache`,
+        };
+      }
+    }
+
     try {
       const res = await toolDef.execute(input, toolContext);
+      if (toolName === 'searchKnowledgeBase' && res.status === 'SUCCESS' && Array.isArray(res.output?.results)) {
+        kcache.setCachedKnowledge(input.query, res.output.results, input.propertyId, input.category);
+      }
       return res;
     } catch (err: any) {
       return {
@@ -1547,20 +1620,23 @@ export async function respondNode(state: AgentStateType): Promise<Partial<AgentS
     context,
     state.modelName,
     detectedLanguage,
-    state.userProfile?.role
+    state.userProfile?.role,
+    state.conversationHistory
   );
 
   if (dynamicResponse) {
     const prev = context.previousRelatedIssue;
-    let finalDynamic = dynamicResponse;
+    let finalDynamic = dynamicResponse.userResponse;
+    const suggestedFollowUps = dynamicResponse.suggestedFollowUps;
+
     if (
       prev &&
-      !dynamicResponse.includes('Previous related') &&
+      !finalDynamic.includes('Previous related') &&
       (detectedIntents.some((i) => i.intent === 'MAINTENANCE_REPORT' || i.intent === 'MAINTENANCE_STATUS') ||
         userMessage.toLowerCase().includes('ac') ||
         userMessage.toLowerCase().includes('broken'))
     ) {
-      finalDynamic = `Previous related maintenance issue found.\n\nYou previously reported "${prev.title}" for this property (Status: ${prev.status}, Resolution: ${prev.resolution || 'AC service completed'}). Since this issue has recurred, I have escalated it with HIGH priority to the property owner and technician.\n\n${dynamicResponse}`;
+      finalDynamic = `Previous related maintenance issue found.\n\nYou previously reported "${prev.title}" for this property (Status: ${prev.status}, Resolution: ${prev.resolution || 'AC service completed'}). Since this issue has recurred, I have escalated it with HIGH priority to the property owner and technician.\n\n${finalDynamic}`;
     }
 
     const finalStep: ExecutionStep = {
@@ -1591,6 +1667,7 @@ export async function respondNode(state: AgentStateType): Promise<Partial<AgentS
       userResponse: finalDynamic,
       executionSteps: [finalStep],
       ragEvaluation,
+      suggestedFollowUps,
     };
   }
 
@@ -1907,10 +1984,20 @@ export async function respondNode(state: AgentStateType): Promise<Partial<AgentS
     }
   }
 
+  const suggestedFollowUps = typeof generateContextualFollowUps === 'function'
+    ? generateContextualFollowUps(
+        detectedIntents[0]?.intent || state.intent,
+        state.userProfile?.role,
+        results,
+        userMessage
+      )
+    : [];
+
   return {
     userResponse,
     executionSteps: [finalStep],
     ragEvaluation,
+    suggestedFollowUps,
   };
 }
 

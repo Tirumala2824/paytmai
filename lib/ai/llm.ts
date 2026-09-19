@@ -1,6 +1,7 @@
 import { ChatGoogleGenerativeAI } from '@langchain/google-genai';
 import { HumanMessage } from '@langchain/core/messages';
-import { IntentType } from './types';
+import { IntentType, ChatTurn } from './types';
+import { kcache } from './cache/kcache';
 
 /**
  * List of supported dynamic Gemini models.
@@ -14,6 +15,63 @@ export const SUPPORTED_GEMINI_MODELS = [
 export type GeminiModelId = (typeof SUPPORTED_GEMINI_MODELS)[number] | string;
 
 /**
+ * Generates intelligent, context-aware follow-up question chips.
+ */
+export function generateContextualFollowUps(
+  intent: string,
+  userRole: string = 'TENANT',
+  toolResults: Record<string, any> = {},
+  userMessage: string = ''
+): string[] {
+  const lowerMsg = userMessage.toLowerCase();
+
+  if (userRole === 'OWNER' || userRole === 'PROPERTY_MANAGER') {
+    if (intent.includes('PORTFOLIO') || intent.includes('REVENUE')) {
+      return ['Show vacant rooms', 'List active tenants', 'Show pending rent payments'];
+    }
+    if (intent.includes('VACANCY') || intent.includes('ROOM')) {
+      return ['Show revenue breakdown', 'List active tenants', 'Show maintenance tickets'];
+    }
+    if (intent.includes('MAINTENANCE') || intent.includes('TICKET')) {
+      return ['Dispatch technician', 'Show tenant roster', 'Show monthly revenue'];
+    }
+    return ['What is my monthly revenue?', 'Show vacant rooms', 'Show maintenance tickets'];
+  }
+
+  // Tenant persona contextual follow-ups
+  if (lowerMsg.includes('wifi') || lowerMsg.includes('wi-fi') || lowerMsg.includes('password') || lowerMsg.includes('internet')) {
+    return ['What are the mess timings?', 'What are the visitor hours?', 'Who is my property manager?'];
+  }
+  if (lowerMsg.includes('mess') || lowerMsg.includes('food') || lowerMsg.includes('dinner') || lowerMsg.includes('lunch')) {
+    return ['What is the Wi-Fi password?', 'What are the gate rules?', 'Show my room details'];
+  }
+  if (lowerMsg.includes('gate') || lowerMsg.includes('curfew') || lowerMsg.includes('rule') || lowerMsg.includes('visitor')) {
+    return ['What is the Wi-Fi password?', 'What are the mess timings?', 'Contact property manager'];
+  }
+  if (intent.includes('MAINTENANCE') || intent.includes('ISSUE') || lowerMsg.includes('broken') || lowerMsg.includes('ac') || lowerMsg.includes('leak')) {
+    return ['When will the technician arrive?', 'Notify owner that it is urgent', 'Check repair status'];
+  }
+  if (intent.includes('PAYMENT') || intent.includes('RENT')) {
+    return ['Download rent receipt', 'When is next month\'s rent due?', 'Show payment history'];
+  }
+  if (intent.includes('LEASE') || intent.includes('RENTAL') || intent.includes('ROOM')) {
+    return ['Is my rent paid?', 'What are the house rules?', 'Contact property manager'];
+  }
+  return ['What is the Wi-Fi password?', 'When is my next rent due?', 'My AC is not working'];
+}
+
+let quotaCooldownUntil = 0;
+
+export function recordQuotaExhausted(retryDelaySeconds: number = 60): void {
+  quotaCooldownUntil = Date.now() + retryDelaySeconds * 1000;
+  console.warn(`[KCache/LLM] Gemini quota rate limit hit. Activating fast deterministic fallback cooldown until ${new Date(quotaCooldownUntil).toISOString()}`);
+}
+
+export function isQuotaInCooldown(): boolean {
+  return Date.now() < quotaCooldownUntil;
+}
+
+/**
  * Checks if a valid Gemini API key is present in environment variables.
  */
 export function getGeminiApiKey(): string | undefined {
@@ -21,6 +79,7 @@ export function getGeminiApiKey(): string | undefined {
 }
 
 export function isGeminiConfigured(): boolean {
+  if (isQuotaInCooldown()) return false;
   const key = getGeminiApiKey();
   return !!key && key.trim().length > 0 && !key.includes('placeholder') && key !== 'undefined';
 }
@@ -45,6 +104,7 @@ export function getGeminiModel(
   temperature: number = 0.2,
   customModel?: string
 ): ChatGoogleGenerativeAI | null {
+  if (isQuotaInCooldown()) return null;
   const apiKey = getGeminiApiKey();
   if (!apiKey || !isGeminiConfigured()) return null;
 
@@ -115,8 +175,11 @@ User message: "${userMessage}"`;
         modelUsed,
       };
     }
-  } catch (err) {
-    console.warn(`Gemini (${modelUsed}) dynamic intent parsing failed, falling back:`, err);
+  } catch (err: any) {
+    if (err?.message?.includes('429') || err?.message?.includes('Quota') || err?.status === 429) {
+      recordQuotaExhausted(45);
+    }
+    console.warn(`Gemini (${modelUsed}) dynamic intent parsing failed, falling back:`, err?.message || err);
   }
   return null;
 }
@@ -127,7 +190,8 @@ User message: "${userMessage}"`;
  */
 export async function dynamicAnalyzeMultiIntents(
   userMessage: string,
-  customModel?: string
+  customModel?: string,
+  conversationHistory?: ChatTurn[]
 ): Promise<{
   intents: Array<{
     intent: IntentType;
@@ -142,12 +206,25 @@ export async function dynamicAnalyzeMultiIntents(
   if (!model) return null;
 
   const modelUsed = getGeminiModelName(customModel);
+  const cacheKey = `intent:${modelUsed}:${userMessage.toLowerCase().trim()}`;
+  const cached = kcache.getCachedLlm(cacheKey);
+  if (cached) {
+    return cached;
+  }
+
+  const historyContext =
+    Array.isArray(conversationHistory) && conversationHistory.length > 0
+      ? `\nRecent Conversation Dialogue (use this to resolve follow-up questions, pronouns like 'it', 'again', or topic continuity):\n${conversationHistory
+          .slice(-4)
+          .map((t) => `${t.role === 'user' ? 'User' : 'Assistant'}: ${t.content}`)
+          .join('\n')}\n`
+      : '';
 
   try {
     const prompt = `You are the multi-intent extraction engine for HavenDex, an AI-powered rental OS.
 A single user message can contain ONE OR MULTIPLE intents.
 Analyze the message and extract ALL distinct intents as a JSON array.
-
+${historyContext}
 Possible intent values:
 - "PAYMENT_STATUS": asking if rent is paid, checking payment status
 - "RENT_DUE": asking when rent is due, due date, invoice schedule
@@ -188,7 +265,7 @@ User message: "${userMessage}"`;
     const parsed = JSON.parse(cleaned);
 
     if (Array.isArray(parsed) && parsed.length > 0) {
-      return {
+      const result = {
         intents: parsed.map((item) => ({
           intent: item.intent as IntentType,
           confidence: item.confidence || 0.9,
@@ -198,9 +275,14 @@ User message: "${userMessage}"`;
         })),
         modelUsed,
       };
+      kcache.setCachedLlm(cacheKey, result);
+      return result;
     }
-  } catch (err) {
-    console.warn(`Gemini (${modelUsed}) dynamic multi-intent parsing failed, falling back:`, err);
+  } catch (err: any) {
+    if (err?.message?.includes('429') || err?.message?.includes('Quota') || err?.status === 429) {
+      recordQuotaExhausted(45);
+    }
+    console.warn(`Gemini (${modelUsed}) dynamic multi-intent parsing failed, falling back:`, err?.message || err);
   }
   return null;
 }
@@ -246,7 +328,8 @@ Return strictly JSON array without markdown formatting.`;
 
 /**
  * Dynamically synthesizes natural language response using the configured Gemini model grounded in tool execution results.
- * Supports multilingual responses (Hindi, Indian English, etc.) and strict role isolation (TENANT vs OWNER).
+ * Supports multi-turn dialogue context, multilingual responses (Hindi, Indian English, etc.), and strict role isolation (TENANT vs OWNER).
+ * Also returns 2-3 context-aware suggested follow-up questions.
  */
 export async function dynamicSynthesizeResponse(
   userMessage: string,
@@ -255,8 +338,9 @@ export async function dynamicSynthesizeResponse(
   context: any,
   customModel?: string,
   languageCode?: string,
-  userRole?: string
-): Promise<string | null> {
+  userRole?: string,
+  conversationHistory?: ChatTurn[]
+): Promise<{ userResponse: string; suggestedFollowUps: string[] } | null> {
   const model = getGeminiModel(0.3, customModel);
   if (!model) return null;
 
@@ -282,9 +366,17 @@ CRITICAL ROLE RESTRICTIONS:
       ? `\nRetrieved Knowledge Base (RAG Grounding from Cognee/PostgreSQL Knowledge Graph):\n${ragResults.map((r: any) => `• [${r.category}] ${r.summary}`).join('\n')}\n`
       : '';
 
+  const historySection =
+    Array.isArray(conversationHistory) && conversationHistory.length > 0
+      ? `\nRecent Conversation History:\n${conversationHistory
+          .slice(-6)
+          .map((t) => `${t.role === 'user' ? 'User' : 'Assistant'}: ${t.content}`)
+          .join('\n')}\n`
+      : '';
+
   try {
     const prompt = `${roleInstructions}
-
+${historySection}
 The user asked: "${userMessage}"
 Detected Intent(s): "${intent}"
 Target Language: ${targetLanguage}
@@ -298,21 +390,55 @@ ${JSON.stringify(context, null, 2)}
 
 Instructions:
 1. Synthesize a warm, helpful, professional, concise response to the user in ${targetLanguage}.
-2. Respect the role boundaries specified above.
-3. If multiple actions were executed, clearly report each one (e.g. Payment status confirmed, Maintenance issue created, Owner notified).
-4. If an action failed, report its actual failure honestly. Never claim both succeeded if one failed!
-5. Rely strictly on the ground-truth data from the tool results and knowledge base.
-6. If the user asks about property rules, Wi-Fi credentials, mess/food timings, or amenities, provide the exact values retrieved from the knowledge base.
-7. Do not invent any numbers, dates, or false facts.
-8. Keep the response concise and clearly formatted.
+2. Maintain continuity with the prior conversation history. If the user asked a follow-up question (e.g. "What was the password again?" or "Tell the owner"), answer directly using the previous conversation context and results.
+3. Respect the role boundaries specified above.
+4. If multiple actions were executed, clearly report each one (e.g. Payment status confirmed, Maintenance issue created, Owner notified).
+5. If an action failed, report its actual failure honestly. Never claim both succeeded if one failed!
+6. Rely strictly on the ground-truth data from the tool results and knowledge base.
+7. If the user asks about property rules, Wi-Fi credentials, mess/food timings, or amenities, provide the exact values retrieved from the knowledge base.
+8. Do not invent any numbers, dates, or false facts.
+9. Keep the response concise and clearly formatted.
+10. At the very end of your response, provide exactly 2 or 3 contextual follow-up questions the user might ask next, formatted as:
+Follow-up questions:
+- [Question 1]
+- [Question 2]
+- [Question 3]
 
 Response:`;
 
     const res = await model.invoke([new HumanMessage(prompt)]);
     const content = typeof res.content === 'string' ? res.content : JSON.stringify(res.content);
-    return content.trim();
-  } catch (err) {
-    console.warn(`Gemini (${modelUsed}) dynamic response synthesis failed, falling back:`, err);
+
+    // Extract follow-up questions if provided in the model output
+    let userResponse = content.trim();
+    let suggestedFollowUps: string[] = [];
+
+    const followUpMarker = /Follow-up questions:?\s*([\s\S]*)$/i;
+    const match = userResponse.match(followUpMarker);
+    if (match && match[1]) {
+      const questionsBlock = match[1].trim();
+      suggestedFollowUps = questionsBlock
+        .split('\n')
+        .map((line) => line.replace(/^[-*•\d.]+\s*/, '').trim())
+        .filter((line) => line.length > 0 && line.length < 80)
+        .slice(0, 3);
+      userResponse = userResponse.replace(followUpMarker, '').trim();
+    }
+
+    // If model didn't provide follow-ups, generate intelligent contextual defaults
+    if (suggestedFollowUps.length === 0) {
+      suggestedFollowUps = generateContextualFollowUps(intent, userRole, toolResults, userMessage);
+    }
+
+    return {
+      userResponse,
+      suggestedFollowUps,
+    };
+  } catch (err: any) {
+    if (err?.message?.includes('429') || err?.message?.includes('Quota') || err?.status === 429) {
+      recordQuotaExhausted(45);
+    }
+    console.warn(`Gemini (${modelUsed}) dynamic response synthesis failed, falling back:`, err?.message || err);
   }
   return null;
 }

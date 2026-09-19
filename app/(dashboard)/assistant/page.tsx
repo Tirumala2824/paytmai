@@ -198,6 +198,15 @@ export default function AssistantPage() {
     instructions?: string;
   } | null>(null);
 
+  // KCache Telemetry State
+  const [kcacheTelemetry, setKcacheTelemetry] = useState<{
+    hits: number;
+    misses: number;
+    hitRate: number;
+    latencySavedMs: number;
+    cachedSessionsCount: number;
+  } | null>(null);
+
   // Automated Sync & RAG Evaluation State
   const [isSyncingCognee, setIsSyncingCognee] = useState(false);
   const [syncResult, setSyncResult] = useState<any>(null);
@@ -216,7 +225,22 @@ export default function AssistantPage() {
   useEffect(() => {
     fetchContext();
     fetchCogneeStatus();
+    fetchKcacheTelemetry();
   }, []);
+
+  async function fetchKcacheTelemetry() {
+    try {
+      const res = await fetch('/api/assistant/kcache');
+      if (res.ok) {
+        const data = await res.json();
+        if (data.telemetry) {
+          setKcacheTelemetry(data.telemetry);
+        }
+      }
+    } catch {
+      // Non-blocking
+    }
+  }
 
   async function fetchCogneeStatus() {
     try {
@@ -390,6 +414,12 @@ export default function AssistantPage() {
         }
       }
 
+      // Build conversation history turns for multi-turn context retention
+      const historyTurns = messages.slice(-8).map((m) => ({
+        role: m.sender,
+        content: m.text,
+      }));
+
       const res = await fetch('/api/assistant/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -398,6 +428,7 @@ export default function AssistantPage() {
           sessionId: activeSessionId,
           modelName: selectedLlm,
           userRole: activePersona,
+          history: historyTurns,
         }),
       });
 
@@ -408,6 +439,12 @@ export default function AssistantPage() {
 
       const data: AIExecutionResponse = await res.json();
       if (data.sessionId) setActiveSessionId(data.sessionId);
+
+      // Prioritize intelligent dynamic follow-ups from backend/KCache
+      const followUps =
+        Array.isArray(data.suggestedFollowUps) && data.suggestedFollowUps.length > 0
+          ? data.suggestedFollowUps
+          : getFollowUps(data.intent, activePersona);
 
       const assistantMsg: ChatMessage = {
         id: `assistant-${Date.now()}`,
@@ -422,11 +459,12 @@ export default function AssistantPage() {
         previousRelatedIssue: data.previousRelatedIssue,
         isRepeatedIssue: data.isRepeatedIssue,
         ragEvaluation: data.ragEvaluation,
-        followUps: getFollowUps(data.intent, activePersona),
+        followUps,
       };
 
       setMessages((prev) => [...prev, assistantMsg]);
       fetchContext(activePersona);
+      fetchKcacheTelemetry();
     } catch (error: any) {
       setMessages((prev) => [
         ...prev,
@@ -572,6 +610,18 @@ export default function AssistantPage() {
               {cogneeStatus?.connected ? 'Live Cloud' : `${cogneeStatus?.localKnowledgeCount ?? 155} Nodes`}
             </span>
           </button>
+
+          {/* KCache Telemetry Pill */}
+          <div
+            title={`KCache Context & Knowledge Cache: ${kcacheTelemetry?.hits || 0} hits (${kcacheTelemetry?.hitRate || 0}% hit rate), ${kcacheTelemetry?.cachedSessionsCount || 0} active sessions, ~${kcacheTelemetry?.latencySavedMs || 0}ms saved`}
+            className="hidden lg:flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl bg-slate-900 border border-slate-800 text-xs text-slate-300"
+          >
+            <Zap className="h-3.5 w-3.5 text-amber-400" />
+            <span>KCache</span>
+            <span className="text-[10px] px-1.5 py-0.2 rounded bg-amber-500/20 text-amber-300 font-mono">
+              {kcacheTelemetry?.hits ? `${kcacheTelemetry.hits} Hits` : 'Active'}
+            </span>
+          </div>
 
           {/* Models Architecture Overview Pill */}
           <button

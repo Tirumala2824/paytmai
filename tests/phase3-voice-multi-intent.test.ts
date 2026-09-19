@@ -71,6 +71,7 @@ vi.mock('@/lib/ai/llm', () => ({
   dynamicAnalyzeMultiIntents: vi.fn().mockResolvedValue(null),
   dynamicPlanTools: vi.fn().mockResolvedValue(null),
   dynamicSynthesizeResponse: vi.fn().mockResolvedValue(null),
+  generateContextualFollowUps: vi.fn().mockReturnValue(['Can I get a receipt?', 'When is my next due date?']),
 }));
 
 describe('Phase 3: Multilingual Voice & Multi-Intent AI Execution Tests', () => {

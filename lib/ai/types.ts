@@ -62,6 +62,14 @@ export interface PendingConfirmation {
   payload: Record<string, any>;
 }
 
+export interface ChatTurn {
+  role: 'user' | 'assistant';
+  content: string;
+  timestamp?: string;
+  intent?: IntentType | string;
+  suggestedFollowUps?: string[];
+}
+
 export interface AIExecutionResponse {
   sessionId: string;
   intent: IntentType;
@@ -89,6 +97,8 @@ export interface AIExecutionResponse {
   };
   isRepeatedIssue?: boolean;
   ragEvaluation?: import('./rag/evaluator').RagEvaluationResult;
+  suggestedFollowUps?: string[];
+  conversationHistory?: ChatTurn[];
 }
 
 export interface AgentRentalContext {
@@ -165,5 +175,6 @@ export interface AgentRentalContext {
     inProgressMaintenanceCount: number;
     fixedMaintenanceCount: number;
   };
+  conversationHistory?: ChatTurn[];
 }
 
