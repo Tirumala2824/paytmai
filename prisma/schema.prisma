@@ -1,0 +1,327 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+enum UserRole {
+  TENANT
+  OWNER
+  PROPERTY_MANAGER
+  ADMIN
+}
+
+enum RentalLifecycle {
+  BOOKED
+  RENT_DUE
+  PAYMENT
+  ISSUE
+  ACTION
+  FIXED
+  VERIFIED
+}
+
+enum MaintenanceStatus {
+  ISSUE_REPORTED
+  CLASSIFIED
+  OWNER_NOTIFIED
+  TASK_ASSIGNED
+  IN_PROGRESS
+  FIXED
+  VERIFICATION_PENDING
+  VERIFIED
+  CLOSED
+}
+
+enum PaymentStatus {
+  PENDING
+  PROCESSING
+  SUCCESS
+  FAILED
+  REFUNDED
+}
+
+enum NotificationType {
+  RENT_DUE
+  PAYMENT_RECEIVED
+  PAYMENT_FAILED
+  MAINTENANCE_UPDATE
+  LIFECYCLE_CHANGE
+  SYSTEM
+}
+
+model UserProfile {
+  id          String         @id @default(uuid())
+  authUserId  String         @unique // Supabase auth.users ID
+  email       String         @unique
+  name        String
+  phone       String?
+  role        UserRole       @default(TENANT)
+  avatarUrl   String?
+  createdAt   DateTime       @default(now())
+  updatedAt   DateTime       @updatedAt
+
+  tenant        Tenant?
+  owner         Owner?
+  notifications Notification[]
+  agentSessions AgentSession[]
+  auditEvents   AuditEvent[]
+
+  @@index([authUserId])
+  @@index([email])
+  @@index([role])
+}
+
+model Tenant {
+  id               String       @id @default(uuid())
+  userProfileId    String       @unique
+  emergencyContact String?
+  idProofType      String?
+  idProofNumber    String?
+  createdAt        DateTime     @default(now())
+  updatedAt        DateTime     @updatedAt
+
+  userProfile       UserProfile        @relation(fields: [userProfileId], references: [id], onDelete: Cascade)
+  tenancies         Tenancy[]
+  maintenanceIssues MaintenanceIssue[]
+
+  @@index([userProfileId])
+}
+
+model Owner {
+  id                 String     @id @default(uuid())
+  userProfileId      String     @unique
+  companyName        String?
+  taxId              String?
+  bankAccountDetails String?
+  createdAt          DateTime   @default(now())
+  updatedAt          DateTime   @updatedAt
+
+  userProfile UserProfile @relation(fields: [userProfileId], references: [id], onDelete: Cascade)
+  properties  Property[]
+
+  @@index([userProfileId])
+}
+
+model Property {
+  id           String    @id @default(uuid())
+  ownerId      String
+  name         String
+  address      String
+  city         String
+  state        String
+  zipCode      String
+  propertyType String    @default("PG") // PG, APARTMENT, COLIVING
+  description  String?
+  totalRooms   Int       @default(0)
+  amenities    String[]  @default([])
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  owner             Owner              @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  rooms             Room[]
+  tenancies         Tenancy[]
+  maintenanceIssues MaintenanceIssue[]
+
+  @@index([ownerId])
+  @@index([city])
+}
+
+model Room {
+  id            String    @id @default(uuid())
+  propertyId    String
+  roomNumber    String
+  floor         Int       @default(1)
+  roomType      String    @default("SINGLE") // SINGLE, DOUBLE, TRIPLE, SUITE
+  rentAmount    Float
+  depositAmount Float
+  isOccupied    Boolean   @default(false)
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  property  Property  @relation(fields: [propertyId], references: [id], onDelete: Cascade)
+  tenancies Tenancy[]
+
+  @@unique([propertyId, roomNumber])
+  @@index([propertyId])
+  @@index([isOccupied])
+}
+
+model Tenancy {
+  id              String          @id @default(uuid())
+  tenantId        String
+  roomId          String
+  propertyId      String
+  startDate       DateTime
+  endDate         DateTime?
+  monthlyRent     Float
+  securityDeposit Float
+  lifecycleStage  RentalLifecycle @default(BOOKED)
+  isActive        Boolean         @default(true)
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+
+  tenant            Tenant             @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  room              Room               @relation(fields: [roomId], references: [id], onDelete: Restrict)
+  property          Property           @relation(fields: [propertyId], references: [id], onDelete: Restrict)
+  rentSchedules     RentSchedule[]
+  maintenanceIssues MaintenanceIssue[]
+
+  @@index([tenantId])
+  @@index([roomId])
+  @@index([propertyId])
+  @@index([lifecycleStage])
+  @@index([isActive])
+}
+
+model RentSchedule {
+  id           String        @id @default(uuid())
+  tenancyId    String
+  dueDate      DateTime
+  amount       Float
+  billingMonth String        // e.g. "2026-09"
+  status       PaymentStatus @default(PENDING)
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+
+  tenancy  Tenancy   @relation(fields: [tenancyId], references: [id], onDelete: Cascade)
+  payments Payment[]
+
+  @@index([tenancyId])
+  @@index([dueDate])
+  @@index([status])
+}
+
+model Payment {
+  id             String        @id @default(uuid())
+  rentScheduleId String
+  amount         Float
+  currency       String        @default("INR")
+  status         PaymentStatus @default(PENDING)
+  paymentMethod  String        @default("MOCK") // PAYTM, UPI, BANK_TRANSFER, MOCK
+  transactionRef String?       @unique
+  paidAt         DateTime?
+  metadata       Json?
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+
+  rentSchedule RentSchedule @relation(fields: [rentScheduleId], references: [id], onDelete: Cascade)
+
+  @@index([rentScheduleId])
+  @@index([status])
+}
+
+model MaintenanceIssue {
+  id           String            @id @default(uuid())
+  tenancyId    String
+  propertyId   String
+  reportedById String
+  title        String
+  description  String
+  category     String            @default("GENERAL") // PLUMBING, ELECTRICAL, APPLIANCE, CLEANING, GENERAL
+  priority     String            @default("MEDIUM")  // LOW, MEDIUM, HIGH, EMERGENCY
+  status       MaintenanceStatus @default(ISSUE_REPORTED)
+  createdAt    DateTime          @default(now())
+  updatedAt    DateTime          @updatedAt
+
+  tenancy    Tenancy           @relation(fields: [tenancyId], references: [id], onDelete: Cascade)
+  property   Property          @relation(fields: [propertyId], references: [id], onDelete: Cascade)
+  reportedBy Tenant            @relation(fields: [reportedById], references: [id], onDelete: Cascade)
+  tasks      MaintenanceTask[]
+
+  @@index([tenancyId])
+  @@index([propertyId])
+  @@index([reportedById])
+  @@index([status])
+}
+
+model MaintenanceTask {
+  id            String            @id @default(uuid())
+  issueId       String
+  title         String
+  description   String?
+  assignedTo    String?
+  estimatedCost Float?
+  actualCost    Float?
+  status        MaintenanceStatus @default(TASK_ASSIGNED)
+  completedAt   DateTime?
+  createdAt     DateTime          @default(now())
+  updatedAt     DateTime          @updatedAt
+
+  issue MaintenanceIssue @relation(fields: [issueId], references: [id], onDelete: Cascade)
+
+  @@index([issueId])
+  @@index([status])
+}
+
+model Notification {
+  id            String           @id @default(uuid())
+  userProfileId String
+  title         String
+  message       String
+  type          NotificationType @default(SYSTEM)
+  isRead        Boolean          @default(false)
+  link          String?
+  createdAt     DateTime         @default(now())
+  updatedAt     DateTime         @updatedAt
+
+  userProfile UserProfile @relation(fields: [userProfileId], references: [id], onDelete: Cascade)
+
+  @@index([userProfileId])
+  @@index([isRead])
+}
+
+model AgentSession {
+  id            String   @id @default(uuid())
+  userProfileId String
+  tenancyId     String?
+  sessionTitle  String?
+  status        String   @default("ACTIVE") // ACTIVE, COMPLETED, SUSPENDED
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  userProfile UserProfile   @relation(fields: [userProfileId], references: [id], onDelete: Cascade)
+  actions     AgentAction[]
+
+  @@index([userProfileId])
+  @@index([status])
+}
+
+model AgentAction {
+  id            String   @id @default(uuid())
+  sessionId     String
+  actionType    String
+  toolName      String?
+  inputPayload  Json?
+  outputPayload Json?
+  status        String   @default("PROPOSED") // PROPOSED, AUTHORIZED, EXECUTED, REJECTED
+  createdAt     DateTime @default(now())
+
+  session AgentSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@index([sessionId])
+}
+
+model AuditEvent {
+  id            String       @id @default(uuid())
+  actorId       String       // userProfileId or "SYSTEM" or "AGENT"
+  actorRole     String?
+  action        String       // LIFECYCLE_TRANSITION, PAYMENT_PROCESSED, MAINTENANCE_REPORTED, AUTH_LOGIN, AUTH_FAILURE
+  resourceType  String       // TENANCY, PAYMENT, MAINTENANCE_ISSUE, PROPERTY
+  resourceId    String
+  metadata      Json?
+  ipAddress     String?
+  userAgent     String?
+  createdAt     DateTime     @default(now())
+
+  userProfile   UserProfile? @relation(fields: [actorId], references: [id], onDelete: SetNull)
+
+  @@index([actorId])
+  @@index([action])
+  @@index([resourceType, resourceId])
+  @@index([createdAt])
+}
