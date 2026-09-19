@@ -9,7 +9,7 @@ export const dynamic = 'force-dynamic';
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
-    const { message, sessionId, modelName } = body;
+    const { message, sessionId, modelName, languageCode, generateAudio, confirmedAction } = body;
 
     if (!message || typeof message !== 'string') {
       return NextResponse.json(
@@ -43,12 +43,15 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // Execute through LangGraph AI Orchestrator
+    // Execute through LangGraph AI Orchestrator (Phase 3 10-node pipeline)
     const response = await executeRentalAssistant({
       userMessage: message,
       userProfile: authContext.userProfile,
       sessionId,
       modelName,
+      languageCode,
+      generateAudio,
+      confirmedAction,
     });
 
     return NextResponse.json(response);

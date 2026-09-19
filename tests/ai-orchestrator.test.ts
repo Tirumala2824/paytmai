@@ -57,6 +57,15 @@ vi.mock('@/lib/db', () => ({
   },
 }));
 
+vi.mock('@/lib/ai/llm', () => ({
+  isGeminiConfigured: vi.fn().mockReturnValue(false),
+  getGeminiModelName: vi.fn().mockReturnValue('gemini-1.5-flash'),
+  dynamicAnalyzeIntent: vi.fn().mockResolvedValue(null),
+  dynamicAnalyzeMultiIntents: vi.fn().mockResolvedValue(null),
+  dynamicPlanTools: vi.fn().mockResolvedValue(null),
+  dynamicSynthesizeResponse: vi.fn().mockResolvedValue(null),
+}));
+
 describe('AI Orchestrator Phase 2 Success Criteria Tests', () => {
   const tenantProfile = {
     id: 'profile-tenant-01',

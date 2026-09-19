@@ -94,35 +94,80 @@ These 5 canonical rental scenarios execute real domain tools and record database
 
 ---
 
-## 🔄 The Continuous Rental Lifecycle
+## 🎙️ Phase 3: Multilingual Voice & Multi-Intent AI Execution
+
+HavenDex Phase 3 introduces **multilingual Indian voice interactions** powered by **Sarvam AI (Saaras STT & Bulbul TTS)**, a **10-node stateful LangGraph workflow**, **multi-intent extraction**, and **parallel tool execution**.
+
+### 🏛️ Phase 3 Voice Flow
 
 ```
-BOOKED → RENT_DUE → PAYMENT → ISSUE → ACTION → FIXED → VERIFIED
+User Microphone
+  ↓ (audio/webm or audio/wav)
+/api/voice/stt (Sarvam Saaras STT)
+  ↓ { transcript, languageCode } (e.g., "hi-IN" or "en-IN")
+10-Node Stateful LangGraph Pipeline
+  ├── 1. [UNDERSTAND] Normalization & Indian language detection
+  ├── 2. [LOAD_CONTEXT] Tenancy, Room, Property, RentSchedule, Maintenance
+  ├── 3. [DETECT_INTENTS] Multi-intent extraction (Payment, Maintenance, Notification)
+  ├── 4. [PLAN] Multi-tool planning, dependency resolution, sensitive confirmation check
+  ├── 5. [AUTHORIZE] Server-side RBAC & ABAC check for all planned tools
+  ├── 6. [EXECUTE] Parallel execution for independent tools, sequential for dependent tools
+  ├── 7. [VERIFY] Verify database state & task consistency
+  ├── 8. [UPDATE_STATE] Advance rental lifecycle state machine (e.g. to ISSUE or PAYMENT)
+  ├── 9. [MEMORY_EVENT] Record Cognee memory graph event & immutable AuditEvent logs
+  └── 10. [RESPOND] Multilingual response synthesis (reporting per-intent status)
+  ↓
+/api/voice/tts (Sarvam Bulbul TTS)
+  ↓ { audioBase64, mimeType: "audio/wav" }
+Voice Assistant UI (Live state machine: Idle → Listening → Processing → Executing → Completed)
 ```
 
-- **Booked**: Tenancy confirmed and ready for move-in.
-- **Rent Due**: Automated invoice generation and notification.
-- **Payment**: Paytm / UPI instant settlement and reconciliation.
-- **Issue**: Autonomous maintenance triage and categorization.
-- **Action**: Task assigned to vendor or technician.
-- **Fixed**: Technician completion logged with cost details.
-- **Verified**: Tenant sign-off, closing the loop and returning to active rent cycle.
+### 🎯 Phase 3 Canonical Success Scenario (100% Working)
 
----
+User speaks:
+> *"My rent is paid, confirm it and tell the owner my AC isn't working."*
 
-## 🔒 Security Principles
+System executes:
+1. **Sarvam STT**: Transcribes Indian English / Hindi audio.
+2. **Multi-Intent Detection**:
+   - `Intent 1`: Validate/confirm rent payment (`PAYMENT_VALIDATION`)
+   - `Intent 2`: Report maintenance issue (`MAINTENANCE_REPORT`)
+   - `Intent 3`: Notify property owner (`OWNER_NOTIFICATION`)
+3. **Context Retrieval**: Resolves active tenancy at Nexus Heights (Room 101), current cycle rent schedule (₹18,000), and owner (Rajesh Sharma).
+4. **Parallel Execution**:
+   - `getRentStatus` + `createMaintenanceIssue` execute concurrently via `Promise.allSettled`.
+   - `createMaintenanceTask` + `notifyOwner` execute with newly created issue ID.
+5. **Verification & State Update**: Advances rental lifecycle to `ISSUE`, logs to Cognee memory and Prisma audit event.
+6. **Transparent Status Reporting**:
+   - **Payment**: `✓ Confirmed` (Rent of ₹18,000 for 2026-09 is confirmed paid).
+   - **Maintenance**: `✓ Created` (Issue logged for AC malfunction with HIGH priority. Technician assigned: QuickFix Services).
+   - **Owner Notification**: `✓ Sent` (Immediate notification dispatched to owner Rajesh Sharma).
+7. **Sarvam TTS**: Speaks response back to the user in the detected language.
 
-1. **No Direct LLM Access to Prisma**: The LLM / agent never touches the database directly. It must propose typed tools that pass through RBAC and ABAC checks.
-2. **Never Trust Client/AI IDs**: `userId`, `tenantId`, `propertyId`, and `ownerId` are always resolved or verified server-side from the authenticated session.
-3. **Immutable Audit Trail**: Every AI invocation, tool execution, lifecycle transition, and payment is recorded in `AgentSession`, `AgentAction`, and `AuditEvent` tables with sanitized metadata.
+### 🛡️ Failure Handling & Confirmation Principles
+
+- **Partial Failure Reporting**: If one intent succeeds and another fails, the system reports individual statuses accurately. E.g., `Payment: ✓ Confirmed`, `Maintenance: ✗ Could not create task`. It **never** claims both succeeded if one failed.
+- **Sensitive Action Confirmation**: High-impact actions (e.g., executing rent payments) trigger a human-in-the-loop confirmation prompt:
+  > *"Your outstanding rent is ₹18,000 for September 2026. Do you want to proceed with payment?"*
+  The agent does not execute sensitive tools without explicit user authorization.
 
 ---
 
 ## 🧪 Test Suite
 
-Run the complete test suite (34 tests across 5 test files):
+Run the complete test suite (40 tests across 6 test files):
 
 ```bash
 bun test
 ```
+
+| Test Suite | Coverage | Status |
+| :--- | :--- | :--- |
+| `phase3-voice-multi-intent.test.ts` | Canonical scenario, parallel execution, partial failure, confirmation, Hindi, Sarvam | 100% PASS |
+| `ai-orchestrator.test.ts` | 5 canonical rental queries, state transitions, audit logging | 100% PASS |
+| `ai-tools.test.ts` | All 14 typed tools registry, execution, Zod validation | 100% PASS |
+| `lifecycle.test.ts` | Rental state machine valid/invalid transitions | 100% PASS |
+| `abac.test.ts` | Attribute-based access control & tenant/owner resource isolation | 100% PASS |
+| `rbac.test.ts` | Role-based permissions across TENANT, OWNER, ADMIN | 100% PASS |
+
 

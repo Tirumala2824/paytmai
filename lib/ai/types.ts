@@ -34,9 +34,35 @@ export interface ExecutionStep {
   details?: string;
 }
 
+export interface DetectedIntent {
+  intent: IntentType;
+  confidence: number;
+  entities: Record<string, any>;
+  requiresConfirmation?: boolean;
+  confirmationPrompt?: string;
+  confirmationPayload?: Record<string, any>;
+}
+
+export interface MultiIntentExecutionStatus {
+  intent: IntentType;
+  status: 'SUCCESS' | 'FAILED' | 'REJECTED' | 'CONFIRMATION_REQUIRED';
+  summary: string;
+  tools: string[];
+  error?: string;
+}
+
+export interface PendingConfirmation {
+  action: string;
+  prompt: string;
+  intent: IntentType;
+  payload: Record<string, any>;
+}
+
 export interface AIExecutionResponse {
   sessionId: string;
   intent: IntentType;
+  detectedIntents?: DetectedIntent[];
+  intentBreakdown?: MultiIntentExecutionStatus[];
   entities: Record<string, unknown>;
   contextRequired: string[];
   plannedActions: string[];
@@ -46,6 +72,9 @@ export interface AIExecutionResponse {
   userResponse: string;
   executionSteps: ExecutionStep[];
   modelUsed?: string;
+  languageCode?: string;
+  audioBase64?: string;
+  pendingConfirmation?: PendingConfirmation;
 }
 
 export interface AgentRentalContext {
@@ -83,3 +112,4 @@ export interface AgentRentalContext {
     createdAt: string;
   }>;
 }
+

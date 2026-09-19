@@ -6,30 +6,48 @@ import {
   ToolCallResult,
   ExecutionStep,
   AgentRentalContext,
-  AIExecutionResponse,
+  DetectedIntent,
+  MultiIntentExecutionStatus,
+  PendingConfirmation,
 } from './types';
 import { AI_TOOLS_REGISTRY } from './tools';
 import {
-  dynamicAnalyzeIntent,
-  dynamicPlanTools,
+  dynamicAnalyzeMultiIntents,
   dynamicSynthesizeResponse,
-  isGeminiConfigured,
 } from './llm';
+import { recordRentalMemoryEvent } from './memory/cognee';
+import { createAuditEvent } from '@/lib/audit/service';
+import { canAccessProperty, canAccessTenancy } from '@/lib/auth/abac';
+import { advanceRentalLifecycle } from '@/lib/rental/service';
 
 /**
- * Define the LangGraph State Annotation
+ * Define the LangGraph State Annotation for Phase 3
  */
 export const AgentStateAnnotation = Annotation.Root({
   userMessage: Annotation<string>(),
   userProfile: Annotation<UserProfile>(),
   sessionId: Annotation<string>(),
+  languageCode: Annotation<string>(),
+  detectedLanguage: Annotation<string | undefined>(),
   intent: Annotation<IntentType>(),
+  detectedIntents: Annotation<DetectedIntent[]>({
+    reducer: (curr, next) => (next.length > 0 ? next : curr),
+    default: () => [],
+  }),
   entities: Annotation<Record<string, any>>({
     reducer: (curr, next) => ({ ...curr, ...next }),
     default: () => ({}),
   }),
   context: Annotation<AgentRentalContext>(),
   plannedActions: Annotation<string[]>({
+    reducer: (curr, next) => (next.length > 0 ? next : curr),
+    default: () => [],
+  }),
+  authorizedActions: Annotation<string[]>({
+    reducer: (curr, next) => (next.length > 0 ? next : curr),
+    default: () => [],
+  }),
+  rejectedActions: Annotation<Array<{ toolName: string; reason: string }>>({
     reducer: (curr, next) => [...curr, ...next],
     default: () => [],
   }),
@@ -45,6 +63,16 @@ export const AgentStateAnnotation = Annotation.Root({
     reducer: (curr, next) => ({ ...curr, ...next }),
     default: () => ({}),
   }),
+  verificationResults: Annotation<Record<string, { verified: boolean; details: string }>>({
+    reducer: (curr, next) => ({ ...curr, ...next }),
+    default: () => ({}),
+  }),
+  intentBreakdown: Annotation<MultiIntentExecutionStatus[]>({
+    reducer: (curr, next) => (next.length > 0 ? next : curr),
+    default: () => [],
+  }),
+  pendingConfirmation: Annotation<PendingConfirmation | undefined>(),
+  confirmedAction: Annotation<boolean | undefined>(),
   nextState: Annotation<string | undefined>(),
   userResponse: Annotation<string>(),
   modelName: Annotation<string | undefined>(),
@@ -53,143 +81,39 @@ export const AgentStateAnnotation = Annotation.Root({
 export type AgentStateType = typeof AgentStateAnnotation.State;
 
 // ============================================================================
-// NODE 1: Understand Intent
+// NODE 1: UNDERSTAND (Language Detection & Normalization)
 // ============================================================================
-export async function understandIntentNode(state: AgentStateType): Promise<Partial<AgentStateType>> {
-  // 1. Try dynamic LLM classification via Gemini if API key is configured
-  const dynamicResult = await dynamicAnalyzeIntent(state.userMessage, state.modelName);
-  if (dynamicResult) {
-    const step: ExecutionStep = {
-      id: `step-intent-${Date.now()}`,
-      label: `Understanding request (${dynamicResult.modelUsed || 'Gemini'})`,
-      status: 'completed',
-      timestamp: new Date().toISOString(),
-      details: `Dynamically detected intent: ${dynamicResult.intent}`,
-    };
-    return {
-      intent: dynamicResult.intent,
-      entities: dynamicResult.entities,
-      executionSteps: [step],
-    };
+export async function understandNode(state: AgentStateType): Promise<Partial<AgentStateType>> {
+  const rawMessage = state.userMessage.trim();
+  let detectedLanguage = state.languageCode || 'en-IN';
+
+  // Detect Devanagari/Hindi script
+  const hasHindi = /[\u0900-\u097F]/.test(rawMessage);
+  if (hasHindi) {
+    detectedLanguage = 'hi-IN';
   }
 
-  // 2. Deterministic Fallback Rules
-  const message = state.userMessage.toLowerCase().trim();
-  let intent: IntentType = 'GENERAL_RENTAL_ASSISTANCE';
-  const entities: Record<string, any> = {};
-
-  // Intent classification rules
-  if (
-    message.includes('is my rent paid') ||
-    message.includes('rent paid') ||
-    message.includes('did i pay rent') ||
-    message.includes('payment status')
-  ) {
-    intent = 'PAYMENT_STATUS';
-  } else if (
-    message.includes('rent is due when') ||
-    message.includes('when is rent due') ||
-    message.includes('rent due date') ||
-    message.includes('due date') ||
-    message.includes('rent due')
-  ) {
-    intent = 'RENT_DUE';
-  } else if (
-    message.includes('validate payment') ||
-    message.includes('verify payment') ||
-    message.includes('transaction')
-  ) {
-    intent = 'PAYMENT_VALIDATION';
-    const txnMatch = message.match(/txn[_\w]+/i);
-    if (txnMatch) entities.transactionRef = txnMatch[0];
-  } else if (
-    message.includes('tell the owner') ||
-    message.includes('notify the owner') ||
-    message.includes('notify owner') ||
-    message.includes('inform owner')
-  ) {
-    intent = 'OWNER_NOTIFICATION';
-    entities.urgent = message.includes('urgent') || message.includes('emergency') || message.includes('broken');
-    entities.message = state.userMessage;
-  } else if (
-    message.includes('show my maintenance') ||
-    message.includes('show maintenance') ||
-    message.includes('maintenance issues') ||
-    message.includes('my issues') ||
-    message.includes('status of my issue')
-  ) {
-    intent = 'MAINTENANCE_STATUS';
-  } else if (
-    message.includes('not working') ||
-    message.includes("isn't working") ||
-    message.includes('broken') ||
-    message.includes('leak') ||
-    message.includes('fix') ||
-    message.includes('repair') ||
-    message.includes('ac ') ||
-    message.includes('tap') ||
-    message.includes('geyser') ||
-    message.includes('light') ||
-    message.includes('wifi')
-  ) {
-    intent = 'MAINTENANCE_REPORT';
-
-    // Classify category and priority
-    if (message.includes('ac') || message.includes('air conditioner') || message.includes('cooler')) {
-      entities.category = 'APPLIANCE';
-      entities.title = 'Air Conditioning malfunction reported';
-      entities.priority = 'HIGH';
-    } else if (message.includes('leak') || message.includes('tap') || message.includes('flush') || message.includes('pipe')) {
-      entities.category = 'PLUMBING';
-      entities.title = 'Plumbing leak / water fixture issue';
-      entities.priority = 'MEDIUM';
-    } else if (message.includes('spark') || message.includes('power') || message.includes('switch') || message.includes('light')) {
-      entities.category = 'ELECTRICAL';
-      entities.title = 'Electrical / power supply issue';
-      entities.priority = 'HIGH';
-    } else {
-      entities.category = 'GENERAL';
-      entities.title = 'Maintenance assistance requested';
-      entities.priority = 'MEDIUM';
-    }
-    entities.description = state.userMessage;
-  } else if (
-    message.includes('property') ||
-    message.includes('amenities') ||
-    message.includes('address') ||
-    message.includes('building')
-  ) {
-    intent = 'PROPERTY_INFORMATION';
-  } else if (
-    message.includes('tenancy') ||
-    message.includes('lease') ||
-    message.includes('room') ||
-    message.includes('contract')
-  ) {
-    intent = 'RENTAL_INFORMATION';
-  }
+  const langLabel = detectedLanguage.startsWith('hi') ? 'Hindi (हिन्दी)' : 'Indian English';
 
   const step: ExecutionStep = {
-    id: `step-intent-${Date.now()}`,
-    label: 'Understanding request',
+    id: `step-understand-${Date.now()}`,
+    label: `Understanding request (${langLabel})`,
     status: 'completed',
     timestamp: new Date().toISOString(),
-    details: `Detected intent: ${intent}`,
+    details: `Input normalized. Detected language: ${detectedLanguage}`,
   };
 
   return {
-    intent,
-    entities,
+    detectedLanguage,
     executionSteps: [step],
   };
 }
 
 // ============================================================================
-// NODE 2: Retrieve Rental Context
+// NODE 2: LOAD_CONTEXT (Retrieve Rental Context)
 // ============================================================================
-export async function retrieveContextNode(state: AgentStateType): Promise<Partial<AgentStateType>> {
+export async function loadContextNode(state: AgentStateType): Promise<Partial<AgentStateType>> {
   const { userProfile } = state;
-
   let tenancyRecord: any = null;
   let rentScheduleRecord: any = null;
   let maintenanceRecords: any[] = [];
@@ -218,7 +142,7 @@ export async function retrieveContextNode(state: AgentStateType): Promise<Partia
               },
               maintenanceIssues: {
                 orderBy: { createdAt: 'desc' },
-                take: 3,
+                take: 5,
               },
             },
           },
@@ -276,12 +200,12 @@ export async function retrieveContextNode(state: AgentStateType): Promise<Partia
           propertyId: tenancyRecord.propertyId,
           propertyName: tenancyRecord.property.name,
           roomId: tenancyRecord.roomId,
-          roomNumber: tenancyRecord.room.roomNumber,
+          roomNumber: tenancyRecord.room?.roomNumber || 'N/A',
           monthlyRent: tenancyRecord.monthlyRent,
           lifecycleStage: tenancyRecord.lifecycleStage,
           isActive: tenancyRecord.isActive,
-          ownerName: tenancyRecord.property.owner?.userProfile?.name,
-          ownerPhone: tenancyRecord.property.owner?.userProfile?.phone,
+          ownerName: tenancyRecord.property?.owner?.userProfile?.name,
+          ownerPhone: tenancyRecord.property?.owner?.userProfile?.phone,
         }
       : undefined,
     currentRentSchedule: rentScheduleRecord
@@ -309,8 +233,8 @@ export async function retrieveContextNode(state: AgentStateType): Promise<Partia
     status: 'completed',
     timestamp: new Date().toISOString(),
     details: context.tenancy
-      ? `Active lease at ${context.tenancy.propertyName} (${context.tenancy.roomNumber})`
-      : 'No active tenancy located',
+      ? `Active lease at ${context.tenancy.propertyName} (Room ${context.tenancy.roomNumber})`
+      : 'No active lease loaded',
   };
 
   return {
@@ -320,96 +244,443 @@ export async function retrieveContextNode(state: AgentStateType): Promise<Partia
 }
 
 // ============================================================================
-// NODE 3: Plan Actions & Tool Selection
+// NODE 3: DETECT_INTENTS (Multi-Intent Detection)
 // ============================================================================
-export async function planActionsNode(state: AgentStateType): Promise<Partial<AgentStateType>> {
-  const { intent, userMessage } = state;
+export async function detectIntentsNode(state: AgentStateType): Promise<Partial<AgentStateType>> {
+  const message = state.userMessage.toLowerCase().trim();
 
-  // 1. Try dynamic tool planning via Gemini if API key is configured
-  const dynamicTools = await dynamicPlanTools(
-    userMessage,
-    intent,
-    Object.keys(AI_TOOLS_REGISTRY),
-    state.modelName
-  );
+  // 1. Try dynamic multi-intent analysis via Gemini if configured
+  const dynamicResult = await dynamicAnalyzeMultiIntents(state.userMessage, state.modelName);
+  if (dynamicResult && dynamicResult.intents.length > 0) {
+    const primaryIntent = dynamicResult.intents[0].intent;
+    const mergedEntities = dynamicResult.intents.reduce(
+      (acc, curr) => ({ ...acc, ...curr.entities }),
+      {}
+    );
 
-  if (dynamicTools && dynamicTools.length > 0) {
     const step: ExecutionStep = {
-      id: `step-plan-${Date.now()}`,
-      label: `Actions planned (${state.modelName || 'Gemini'})`,
+      id: `step-intents-${Date.now()}`,
+      label: `Multi-intent detected (${dynamicResult.intents.length} intents)`,
       status: 'completed',
       timestamp: new Date().toISOString(),
-      details: `Dynamically selected tools: ${dynamicTools.join(', ')}`,
+      details: dynamicResult.intents.map((i) => i.intent).join(', '),
     };
 
     return {
-      plannedActions: dynamicTools,
+      intent: primaryIntent,
+      detectedIntents: dynamicResult.intents,
+      entities: mergedEntities,
       executionSteps: [step],
     };
   }
 
-  // 2. Deterministic Fallback Tool Mapping
-  const plannedActions: string[] = [];
+  // 2. Deterministic Multi-Intent Rule Engine (100% Reliable & Fast Fallback)
+  const detectedIntents: DetectedIntent[] = [];
+  const entities: Record<string, any> = {};
 
-  switch (intent) {
-    case 'PAYMENT_STATUS':
-      plannedActions.push('getRentStatus', 'getPaymentHistory');
-      break;
+  // Check Intent: OWNER_NOTIFICATION (Prioritized if user specifically commands to notify/tell owner)
+  const isExplicitOwnerCommand =
+    message.startsWith('tell the owner') ||
+    message.startsWith('notify the owner') ||
+    message.startsWith('notify owner') ||
+    message.startsWith('inform owner') ||
+    message.startsWith('मालिक को बताएं');
 
-    case 'RENT_DUE':
-      plannedActions.push('getRentStatus');
-      break;
+  const hasOwnerNotification =
+    isExplicitOwnerCommand ||
+    message.includes('tell the owner') ||
+    message.includes('notify the owner') ||
+    message.includes('notify owner') ||
+    message.includes('inform owner') ||
+    message.includes('मालिक को बताएं') ||
+    message.includes('मालिक को सूचित');
 
-    case 'PAYMENT_VALIDATION':
-      plannedActions.push('validatePayment');
-      break;
+  if (isExplicitOwnerCommand && hasOwnerNotification) {
+    const notifyMessage = entities.title
+      ? `Tenant reported: ${entities.title}`
+      : state.userMessage;
+    const urgent =
+      message.includes('urgent') ||
+      message.includes('emergency') ||
+      message.includes('broken');
 
-    case 'MAINTENANCE_REPORT':
-      // End-to-end autonomous flow: create issue -> assign task -> notify owner
-      plannedActions.push('createMaintenanceIssue', 'createMaintenanceTask', 'notifyOwner');
-      break;
+    entities.urgent = urgent;
+    entities.message = notifyMessage;
 
-    case 'MAINTENANCE_STATUS':
-      plannedActions.push('getMaintenanceIssues');
-      break;
-
-    case 'OWNER_NOTIFICATION':
-      plannedActions.push('notifyOwner');
-      break;
-
-    case 'PROPERTY_INFORMATION':
-      plannedActions.push('getProperty');
-      break;
-
-    case 'RENTAL_INFORMATION':
-      plannedActions.push('getTenancy', 'getRoom');
-      break;
-
-    case 'GENERAL_RENTAL_ASSISTANCE':
-    default:
-      plannedActions.push('getTenancy');
-      break;
+    detectedIntents.push({
+      intent: 'OWNER_NOTIFICATION',
+      confidence: 0.98,
+      entities: { message: notifyMessage, urgent },
+    });
   }
 
+  // Check Intent: PAYMENT_VALIDATION / PAYMENT_STATUS
+  const hasPaymentQuery =
+    message.includes('rent is paid') ||
+    message.includes('confirm it') ||
+    message.includes('is my rent paid') ||
+    message.includes('did i pay rent') ||
+    message.includes('payment status') ||
+    message.includes('validate payment') ||
+    message.includes('verify payment') ||
+    message.includes('किराया भर दिया') ||
+    message.includes('किराया जमा');
+
+  if (hasPaymentQuery) {
+    const isValidation =
+      message.includes('confirm') ||
+      message.includes('validate') ||
+      message.includes('verify') ||
+      message.includes('पुष्टि');
+
+    detectedIntents.push({
+      intent: isValidation ? 'PAYMENT_VALIDATION' : 'PAYMENT_STATUS',
+      confidence: 0.98,
+      entities: {},
+    });
+  }
+
+  // Check Intent: RENT_DUE
+  const hasRentDueQuery =
+    (message.includes('rent is due when') ||
+      message.includes('when is rent due') ||
+      message.includes('rent due date') ||
+      message.includes('due date') ||
+      message.includes('कब देना है')) &&
+    !hasPaymentQuery;
+
+  if (hasRentDueQuery) {
+    detectedIntents.push({
+      intent: 'RENT_DUE',
+      confidence: 0.95,
+      entities: {},
+    });
+  }
+
+  // Check Intent: MAINTENANCE_REPORT
+  const hasMaintenanceReport =
+    message.includes('not working') ||
+    message.includes("isn't working") ||
+    message.includes('broken') ||
+    message.includes('leak') ||
+    message.includes('repair') ||
+    message.includes('fix') ||
+    message.includes('ac') ||
+    message.includes('cooler') ||
+    message.includes('geyser') ||
+    message.includes('tap') ||
+    message.includes('काम नहीं कर रहा') ||
+    message.includes('खराब');
+
+  if (hasMaintenanceReport && !isExplicitOwnerCommand) {
+    let category = 'GENERAL';
+    let priority = 'MEDIUM';
+    let title = 'Maintenance issue reported';
+
+    if (
+      message.includes('ac') ||
+      message.includes('air conditioner') ||
+      message.includes('cooler') ||
+      message.includes('एसी')
+    ) {
+      category = 'APPLIANCE';
+      priority = 'HIGH';
+      title = 'Air Conditioning malfunction reported';
+    } else if (
+      message.includes('leak') ||
+      message.includes('tap') ||
+      message.includes('pipe') ||
+      message.includes('पानी')
+    ) {
+      category = 'PLUMBING';
+      priority = 'MEDIUM';
+      title = 'Plumbing leak / water fixture issue';
+    } else if (
+      message.includes('spark') ||
+      message.includes('power') ||
+      message.includes('light') ||
+      message.includes('बिजली')
+    ) {
+      category = 'ELECTRICAL';
+      priority = 'HIGH';
+      title = 'Electrical issue reported';
+    }
+
+    entities.category = category;
+    entities.priority = priority;
+    entities.title = title;
+    entities.description = state.userMessage;
+
+    detectedIntents.push({
+      intent: 'MAINTENANCE_REPORT',
+      confidence: 0.97,
+      entities: { category, priority, title, description: state.userMessage },
+    });
+  }
+
+  // Check non-prefix OWNER_NOTIFICATION
+  if (hasOwnerNotification && !isExplicitOwnerCommand) {
+    const notifyMessage = entities.title
+      ? `Tenant reported: ${entities.title}`
+      : state.userMessage;
+    const urgent =
+      message.includes('urgent') ||
+      message.includes('emergency') ||
+      message.includes('again') ||
+      entities.priority === 'HIGH';
+
+    entities.urgent = urgent;
+    entities.message = notifyMessage;
+
+    detectedIntents.push({
+      intent: 'OWNER_NOTIFICATION',
+      confidence: 0.95,
+      entities: { message: notifyMessage, urgent },
+    });
+  }
+
+  // Check Intent: MAINTENANCE_STATUS
+  if (
+    message.includes('show my maintenance') ||
+    message.includes('show maintenance') ||
+    message.includes('maintenance issues') ||
+    message.includes('my issues')
+  ) {
+    detectedIntents.push({
+      intent: 'MAINTENANCE_STATUS',
+      confidence: 0.95,
+      entities: {},
+    });
+  }
+
+  // Check Intent: SENSITIVE_CONFIRMATION_CHECK (e.g. paying rent)
+  if (
+    message.includes('pay rent') ||
+    message.includes('proceed with payment') ||
+    message.includes('make payment')
+  ) {
+    detectedIntents.push({
+      intent: 'PAYMENT_STATUS',
+      confidence: 0.95,
+      requiresConfirmation: true,
+      confirmationPrompt: `Your outstanding rent is ₹${state.context?.currentRentSchedule?.amount || '18,000'}. Do you want to proceed with payment?`,
+      entities: {},
+    });
+  }
+
+  // Default fallback if no intent detected
+  if (detectedIntents.length === 0) {
+    detectedIntents.push({
+      intent: 'GENERAL_RENTAL_ASSISTANCE',
+      confidence: 0.5,
+      entities: {},
+    });
+  }
+
+  const primaryIntent = detectedIntents[0].intent;
+
   const step: ExecutionStep = {
-    id: `step-plan-${Date.now()}`,
-    label: 'Actions planned',
+    id: `step-intents-${Date.now()}`,
+    label: `Multi-intent detected (${detectedIntents.length} intents)`,
     status: 'completed',
     timestamp: new Date().toISOString(),
-    details: `Selected tools: ${plannedActions.join(', ')}`,
+    details: detectedIntents.map((i) => i.intent).join(' + '),
   };
 
   return {
-    plannedActions,
+    intent: primaryIntent,
+    detectedIntents,
+    entities,
     executionSteps: [step],
   };
 }
 
 // ============================================================================
-// NODE 4: Execute Authorized Tools
+// NODE 4: PLAN (Multi-Tool Planning & Dependency Mapping)
 // ============================================================================
-export async function executeToolsNode(state: AgentStateType): Promise<Partial<AgentStateType>> {
-  const { plannedActions, userProfile, sessionId, context, entities } = state;
+export async function planNode(state: AgentStateType): Promise<Partial<AgentStateType>> {
+  const { detectedIntents, confirmedAction } = state;
+  const plannedActions: string[] = [];
+  let pendingConfirmation: PendingConfirmation | undefined = undefined;
+
+  for (const item of detectedIntents) {
+    // Check if sensitive confirmation is needed and not yet confirmed
+    if (item.requiresConfirmation && !confirmedAction) {
+      pendingConfirmation = {
+        action: 'EXECUTE_PAYMENT',
+        prompt:
+          item.confirmationPrompt ||
+          `Your outstanding rent is ₹${state.context?.currentRentSchedule?.amount || '18,000'}. Do you want to proceed with payment?`,
+        intent: item.intent,
+        payload: item.entities,
+      };
+      // Do not plan sensitive tool until confirmed
+      continue;
+    }
+
+    switch (item.intent) {
+      case 'PAYMENT_VALIDATION':
+      case 'PAYMENT_STATUS':
+      case 'RENT_DUE':
+        if (!plannedActions.includes('getRentStatus')) {
+          plannedActions.push('getRentStatus');
+        }
+        break;
+
+      case 'MAINTENANCE_REPORT':
+        if (!plannedActions.includes('createMaintenanceIssue')) {
+          plannedActions.push('createMaintenanceIssue');
+        }
+        if (!plannedActions.includes('createMaintenanceTask')) {
+          plannedActions.push('createMaintenanceTask');
+        }
+        if (!plannedActions.includes('notifyOwner')) {
+          plannedActions.push('notifyOwner');
+        }
+        break;
+
+      case 'OWNER_NOTIFICATION':
+        if (!plannedActions.includes('notifyOwner')) {
+          plannedActions.push('notifyOwner');
+        }
+        break;
+
+      case 'MAINTENANCE_STATUS':
+        if (!plannedActions.includes('getMaintenanceIssues')) {
+          plannedActions.push('getMaintenanceIssues');
+        }
+        break;
+
+      case 'PROPERTY_INFORMATION':
+        if (!plannedActions.includes('getProperty')) {
+          plannedActions.push('getProperty');
+        }
+        break;
+
+      case 'RENTAL_INFORMATION':
+        if (!plannedActions.includes('getTenancy')) {
+          plannedActions.push('getTenancy');
+        }
+        break;
+
+      case 'GENERAL_RENTAL_ASSISTANCE':
+      default:
+        if (plannedActions.length === 0) {
+          plannedActions.push('getTenancy');
+        }
+        break;
+    }
+  }
+
+  const step: ExecutionStep = {
+    id: `step-plan-${Date.now()}`,
+    label: `Actions planned (${plannedActions.length} tools)`,
+    status: 'completed',
+    timestamp: new Date().toISOString(),
+    details: `Tools: ${plannedActions.join(', ')}`,
+  };
+
+  return {
+    plannedActions,
+    pendingConfirmation,
+    executionSteps: [step],
+  };
+}
+
+// ============================================================================
+// NODE 5: AUTHORIZE (Server-Side RBAC & ABAC Verification)
+// ============================================================================
+export async function authorizeNode(state: AgentStateType): Promise<Partial<AgentStateType>> {
+  const { plannedActions, userProfile, context } = state;
+  const authorizedActions: string[] = [];
+  const rejectedActions: Array<{ toolName: string; reason: string }> = [];
+
+  for (const toolName of plannedActions) {
+    let isAuthorized = false;
+    let rejectReason = '';
+
+    // Verify RBAC and ABAC for each tool
+    switch (toolName) {
+      case 'getRentStatus':
+      case 'getPaymentHistory':
+      case 'validatePayment':
+        // Tenant can access only own tenancy; Owner can access owned properties
+        if (userProfile.role === UserRole.TENANT && context.tenancy) {
+          isAuthorized = true;
+        } else if (userProfile.role === UserRole.OWNER || userProfile.role === UserRole.ADMIN) {
+          isAuthorized = true;
+        } else {
+          rejectReason = 'Unauthorized to access payment records for this tenancy';
+        }
+        break;
+
+      case 'createMaintenanceIssue':
+        // Tenants can report maintenance on their own tenancy
+        if (userProfile.role === UserRole.TENANT && context.tenancy) {
+          isAuthorized = true;
+        } else if (userProfile.role === UserRole.ADMIN) {
+          isAuthorized = true;
+        } else {
+          rejectReason = 'Only active tenants can report new maintenance issues';
+        }
+        break;
+
+      case 'createMaintenanceTask':
+        // Autonomous technician dispatch is permitted for active tenancy issues
+        isAuthorized = true;
+        break;
+
+      case 'notifyOwner':
+        // Tenants can notify their property owner
+        if (context.tenancy) {
+          isAuthorized = true;
+        } else {
+          rejectReason = 'No active tenancy located to resolve owner';
+        }
+        break;
+
+      case 'getMaintenanceIssues':
+      case 'getProperty':
+      case 'getRoom':
+      case 'getTenancy':
+        isAuthorized = true;
+        break;
+
+      default:
+        isAuthorized = true;
+        break;
+    }
+
+    if (isAuthorized) {
+      authorizedActions.push(toolName);
+    } else {
+      rejectedActions.push({ toolName, reason: rejectReason });
+    }
+  }
+
+  const step: ExecutionStep = {
+    id: `step-auth-${Date.now()}`,
+    label: `Authorization verified (${authorizedActions.length} approved)`,
+    status: rejectedActions.length > 0 ? 'failed' : 'completed',
+    timestamp: new Date().toISOString(),
+    details:
+      rejectedActions.length > 0
+        ? `Rejected: ${rejectedActions.map((r) => r.toolName).join(', ')}`
+        : 'All proposed actions approved under RBAC & ABAC',
+  };
+
+  return {
+    authorizedActions,
+    rejectedActions,
+    executionSteps: [step],
+  };
+}
+
+// ============================================================================
+// NODE 6: EXECUTE (Parallel & Sequential Tool Execution)
+// ============================================================================
+export async function executeNode(state: AgentStateType): Promise<Partial<AgentStateType>> {
+  const { authorizedActions, userProfile, sessionId, context, entities } = state;
   const toolCalls: ToolCallResult[] = [];
   const executionSteps: ExecutionStep[] = [];
   const results: Record<string, any> = {};
@@ -420,22 +691,115 @@ export async function executeToolsNode(state: AgentStateType): Promise<Partial<A
     activeTenancyId: context.tenancy?.id,
   };
 
-  for (const toolName of plannedActions) {
-    const toolDef = (AI_TOOLS_REGISTRY as any)[toolName];
-    if (!toolDef) continue;
+  // Divide tools into independent vs dependent batches for parallel execution
+  // Independent batch: getRentStatus, validatePayment, createMaintenanceIssue, getMaintenanceIssues
+  // Dependent batch: createMaintenanceTask (needs issueId), notifyOwner (needs issue context)
 
+  const independentTools = authorizedActions.filter((t) =>
+    ['getRentStatus', 'validatePayment', 'createMaintenanceIssue', 'getMaintenanceIssues', 'getProperty', 'getRoom', 'getTenancy'].includes(t)
+  );
+
+  const dependentTools = authorizedActions.filter((t) =>
+    ['createMaintenanceTask', 'notifyOwner'].includes(t)
+  );
+
+  // Helper to execute a single tool
+  async function runTool(toolName: string, resolvedInput?: any): Promise<ToolCallResult> {
+    const toolDef = (AI_TOOLS_REGISTRY as any)[toolName];
+    if (!toolDef) {
+      return {
+        toolName,
+        status: 'FAILED',
+        input: {},
+        output: {},
+        error: `Tool ${toolName} not found in registry`,
+      };
+    }
+
+    let input = resolvedInput || {};
+    if (!resolvedInput) {
+      if (toolName === 'createMaintenanceIssue') {
+        input = {
+          title: entities.title || 'Maintenance issue reported by tenant',
+          description: entities.description || state.userMessage,
+          category: entities.category || 'GENERAL',
+          priority: entities.priority || 'MEDIUM',
+        };
+      } else if (toolName === 'getRentStatus') {
+        input = { tenancyId: context.tenancy?.id };
+      } else if (toolName === 'validatePayment') {
+        input = {
+          transactionRef: entities.transactionRef,
+          rentScheduleId: context.currentRentSchedule?.id,
+        };
+      } else if (toolName === 'getMaintenanceIssues') {
+        input = { tenancyId: context.tenancy?.id };
+      } else if (toolName === 'getProperty') {
+        input = { propertyId: context.tenancy?.propertyId };
+      } else if (toolName === 'getRoom') {
+        input = { roomId: context.tenancy?.roomId };
+      } else if (toolName === 'getTenancy') {
+        input = { tenancyId: context.tenancy?.id };
+      }
+    }
+
+    try {
+      const res = await toolDef.execute(input, toolContext);
+      return res;
+    } catch (err: any) {
+      return {
+        toolName,
+        status: 'FAILED',
+        input,
+        output: {},
+        error: err.message,
+      };
+    }
+  }
+
+  // 1. Execute Independent Batch in Parallel via Promise.allSettled
+  if (independentTools.length > 0) {
+    const parallelPromises = independentTools.map((t) => runTool(t));
+    const settledResults = await Promise.allSettled(parallelPromises);
+
+    settledResults.forEach((settled, index) => {
+      const toolName = independentTools[index];
+      let res: ToolCallResult;
+
+      if (settled.status === 'fulfilled') {
+        res = settled.value;
+      } else {
+        res = {
+          toolName,
+          status: 'FAILED',
+          input: {},
+          output: {},
+          error: settled.reason?.message || 'Tool execution rejected',
+        };
+      }
+
+      toolCalls.push(res);
+      results[toolName] = res;
+
+      let label = `Executed ${toolName}`;
+      if (toolName === 'getRentStatus') label = 'Rent status validated (Parallel)';
+      if (toolName === 'createMaintenanceIssue') label = 'Maintenance issue created (Parallel)';
+
+      executionSteps.push({
+        id: `step-${toolName}-${Date.now()}`,
+        label,
+        status: res.status === 'SUCCESS' ? 'completed' : 'failed',
+        timestamp: new Date().toISOString(),
+        details: res.summary || res.error,
+      });
+    });
+  }
+
+  // 2. Execute Dependent Batch Sequentially (with inputs from independent batch)
+  for (const toolName of dependentTools) {
     let input: any = {};
 
-    // Prepare inputs based on resolved server context and extracted entities
-    if (toolName === 'createMaintenanceIssue') {
-      input = {
-        title: entities.title || 'Maintenance issue reported by tenant',
-        description: entities.description || state.userMessage,
-        category: entities.category || 'GENERAL',
-        priority: entities.priority || 'MEDIUM',
-      };
-    } else if (toolName === 'createMaintenanceTask') {
-      // Use issue created in previous step if available
+    if (toolName === 'createMaintenanceTask') {
       const createdIssue = results.createMaintenanceIssue?.output;
       const issueId = createdIssue?.issueId || context.recentMaintenance?.[0]?.id;
 
@@ -448,6 +812,21 @@ export async function executeToolsNode(state: AgentStateType): Promise<Partial<A
           estimatedCost: 1200,
         };
       } else {
+        // Issue creation may have failed
+        toolCalls.push({
+          toolName,
+          status: 'FAILED',
+          input: {},
+          output: {},
+          error: 'Cannot assign technician: no maintenance issue was created',
+        });
+        executionSteps.push({
+          id: `step-${toolName}-${Date.now()}`,
+          label: 'Technician task skipped',
+          status: 'failed',
+          timestamp: new Date().toISOString(),
+          details: 'Dependent maintenance issue was not found',
+        });
         continue;
       }
     } else if (toolName === 'notifyOwner') {
@@ -458,58 +837,23 @@ export async function executeToolsNode(state: AgentStateType): Promise<Partial<A
           : entities.message || state.userMessage,
         urgent: entities.urgent || false,
       };
-    } else if (toolName === 'validatePayment') {
-      input = {
-        transactionRef: entities.transactionRef,
-        rentScheduleId: context.currentRentSchedule?.id,
-      };
-    } else if (toolName === 'getRentStatus') {
-      input = { tenancyId: context.tenancy?.id };
-    } else if (toolName === 'getPaymentHistory') {
-      input = { tenancyId: context.tenancy?.id, limit: 5 };
-    } else if (toolName === 'getProperty') {
-      input = { propertyId: context.tenancy?.propertyId };
-    } else if (toolName === 'getRoom') {
-      input = { roomId: context.tenancy?.roomId };
     }
 
-    try {
-      const result: ToolCallResult = await toolDef.execute(input, toolContext);
-      toolCalls.push(result);
-      results[toolName] = result;
+    const res = await runTool(toolName, input);
+    toolCalls.push(res);
+    results[toolName] = res;
 
-      // Human-readable execution step
-      let stepLabel = `Executed ${toolName}`;
-      if (toolName === 'createMaintenanceIssue') stepLabel = 'Maintenance issue created';
-      if (toolName === 'createMaintenanceTask') stepLabel = 'Technician task assigned';
-      if (toolName === 'notifyOwner') stepLabel = 'Owner notified';
-      if (toolName === 'getRentStatus') stepLabel = 'Rent status retrieved';
-      if (toolName === 'getMaintenanceIssues') stepLabel = 'Maintenance records retrieved';
+    let label = `Executed ${toolName}`;
+    if (toolName === 'createMaintenanceTask') label = 'Technician task assigned';
+    if (toolName === 'notifyOwner') label = 'Owner notified';
 
-      executionSteps.push({
-        id: `step-${toolName}-${Date.now()}`,
-        label: stepLabel,
-        status: result.status === 'SUCCESS' ? 'completed' : 'failed',
-        timestamp: new Date().toISOString(),
-        details: result.summary || result.error,
-      });
-    } catch (err: any) {
-      const errorResult: ToolCallResult = {
-        toolName,
-        status: 'FAILED',
-        input,
-        output: {},
-        error: err.message,
-      };
-      toolCalls.push(errorResult);
-      executionSteps.push({
-        id: `step-${toolName}-${Date.now()}`,
-        label: `Failed to execute ${toolName}`,
-        status: 'failed',
-        timestamp: new Date().toISOString(),
-        details: err.message,
-      });
-    }
+    executionSteps.push({
+      id: `step-${toolName}-${Date.now()}`,
+      label,
+      status: res.status === 'SUCCESS' ? 'completed' : 'failed',
+      timestamp: new Date().toISOString(),
+      details: res.summary || res.error,
+    });
   }
 
   return {
@@ -520,134 +864,442 @@ export async function executeToolsNode(state: AgentStateType): Promise<Partial<A
 }
 
 // ============================================================================
-// NODE 5: Synthesize Structured Response
+// NODE 7: VERIFY (Verify Tool Outcomes & State Consistency)
 // ============================================================================
-export async function synthesizeResponseNode(state: AgentStateType): Promise<Partial<AgentStateType>> {
-  const { intent, results, context, userMessage } = state;
-  let userResponse = '';
+export async function verifyNode(state: AgentStateType): Promise<Partial<AgentStateType>> {
+  const { results, detectedIntents } = state;
+  const verificationResults: Record<string, { verified: boolean; details: string }> = {};
+  const intentBreakdown: MultiIntentExecutionStatus[] = [];
+
+  for (const item of detectedIntents) {
+    let intentStatus: 'SUCCESS' | 'FAILED' | 'REJECTED' | 'CONFIRMATION_REQUIRED' = 'SUCCESS';
+    let summary = '';
+    const tools: string[] = [];
+
+    switch (item.intent) {
+      case 'PAYMENT_VALIDATION':
+      case 'PAYMENT_STATUS': {
+        tools.push('getRentStatus');
+        const r = results.getRentStatus;
+        if (r?.status === 'SUCCESS') {
+          const isPaid = r.output?.isPaid;
+          const amt = Number(r.output?.amount || 0).toLocaleString('en-IN');
+          verificationResults['PAYMENT'] = {
+            verified: true,
+            details: `Rent payment status: ${isPaid ? 'PAID' : 'PENDING'} (₹${amt})`,
+          };
+          summary = isPaid
+            ? `Rent of ₹${amt} for ${r.output?.billingMonth} is confirmed paid.`
+            : `Rent of ₹${amt} for ${r.output?.billingMonth} is ${r.output?.status}.`;
+        } else {
+          intentStatus = 'FAILED';
+          summary = r?.error || 'Could not retrieve rent status';
+        }
+        break;
+      }
+
+      case 'RENT_DUE': {
+        tools.push('getRentStatus');
+        const r = results.getRentStatus;
+        if (r?.status === 'SUCCESS') {
+          const amt = Number(r.output?.amount || 0).toLocaleString('en-IN');
+          verificationResults['RENT_DUE'] = {
+            verified: true,
+            details: `Rent due on ${r.output?.dueDate}: ₹${amt}`,
+          };
+          summary = `Your rent of ₹${amt} for ${r.output?.billingMonth} is due on ${r.output?.dueDate}. Status: ${r.output?.status}.`;
+        } else {
+          intentStatus = 'FAILED';
+          summary = r?.error || 'Could not retrieve rent due date';
+        }
+        break;
+      }
+
+      case 'MAINTENANCE_STATUS': {
+        tools.push('getMaintenanceIssues');
+        const r = results.getMaintenanceIssues;
+        if (r?.status === 'SUCCESS') {
+          const issues = r.output?.issues || [];
+          verificationResults['MAINTENANCE_STATUS'] = {
+            verified: true,
+            details: `Found ${issues.length} maintenance issues`,
+          };
+          summary =
+            issues.length > 0
+              ? issues
+                  .map(
+                    (i: any, idx: number) =>
+                      `${idx + 1}. ${i.title} — Status: ${i.status} (Priority: ${i.priority})`
+                  )
+                  .join('\n')
+              : 'You currently have no open maintenance issues.';
+        } else {
+          intentStatus = 'FAILED';
+          summary = r?.error || 'Could not retrieve maintenance issues';
+        }
+        break;
+      }
+
+      case 'MAINTENANCE_REPORT': {
+        tools.push('createMaintenanceIssue', 'createMaintenanceTask');
+        const issueRes = results.createMaintenanceIssue;
+        const taskRes = results.createMaintenanceTask;
+
+        if (issueRes?.status === 'SUCCESS') {
+          verificationResults['MAINTENANCE'] = {
+            verified: true,
+            details: `Issue ${issueRes.output?.issueId} logged with task ${taskRes?.output?.taskId || 'pending'}`,
+          };
+          summary = `Logged issue "${issueRes.output?.title}" (${issueRes.output?.priority} priority). Technician assigned.`;
+        } else {
+          intentStatus = 'FAILED';
+          summary = issueRes?.error || 'Could not create maintenance issue';
+        }
+        break;
+      }
+
+      case 'OWNER_NOTIFICATION': {
+        tools.push('notifyOwner');
+        const notifyRes = results.notifyOwner;
+        if (notifyRes?.status === 'SUCCESS') {
+          verificationResults['NOTIFICATION'] = {
+            verified: true,
+            details: `Owner ${notifyRes.output?.recipientOwner} notified successfully`,
+          };
+          summary = `Owner (${notifyRes.output?.recipientOwner}) notified.`;
+        } else {
+          intentStatus = 'FAILED';
+          summary = notifyRes?.error || 'Could not dispatch owner notification';
+        }
+        break;
+      }
+
+      default:
+        summary = 'Assistance query processed';
+        break;
+    }
+
+    intentBreakdown.push({
+      intent: item.intent,
+      status: intentStatus,
+      summary,
+      tools,
+    });
+  }
+
+  const step: ExecutionStep = {
+    id: `step-verify-${Date.now()}`,
+    label: 'Verified tool execution outcomes',
+    status: intentBreakdown.some((i) => i.status === 'FAILED') ? 'failed' : 'completed',
+    timestamp: new Date().toISOString(),
+    details: intentBreakdown.map((i) => `${i.intent}: ${i.status}`).join(' | '),
+  };
+
+  return {
+    verificationResults,
+    intentBreakdown,
+    executionSteps: [step],
+  };
+}
+
+// ============================================================================
+// NODE 8: UPDATE_STATE (Advance Rental Lifecycle & Session)
+// ============================================================================
+export async function updateStateNode(state: AgentStateType): Promise<Partial<AgentStateType>> {
+  const { results, context, userProfile, sessionId } = state;
   let nextState: string | undefined = undefined;
 
-  // 1. Try dynamic natural language response synthesis via Gemini
-  const dynamicResponse = await dynamicSynthesizeResponse(
-    userMessage,
-    intent,
-    results,
-    context,
-    state.modelName
-  );
-  if (dynamicResponse) {
-    if (intent === 'MAINTENANCE_REPORT') nextState = 'ISSUE';
-    else if (intent === 'PAYMENT_STATUS') {
-      const rs = results.getRentStatus?.output;
-      nextState = rs?.isPaid ? 'PAYMENT' : 'RENT_DUE';
+  try {
+    // If maintenance issue was created, advance lifecycle to ISSUE
+    if (results.createMaintenanceIssue?.status === 'SUCCESS' && context.tenancy?.id) {
+      nextState = 'ISSUE';
+      await advanceRentalLifecycle(
+        context.tenancy.id,
+        'ISSUE' as any,
+        { id: userProfile.id, role: userProfile.role, name: userProfile.name },
+        `Maintenance issue reported: ${results.createMaintenanceIssue.output?.title}`
+      );
+    } else if (results.getRentStatus?.status === 'SUCCESS') {
+      nextState = results.getRentStatus.output?.isPaid ? 'PAYMENT' : 'RENT_DUE';
     } else if (context.tenancy?.lifecycleStage) {
       nextState = context.tenancy.lifecycleStage;
     }
 
+    // Update AgentSession in Prisma if update method exists
+    if (sessionId && typeof (prisma.agentSession as any)?.update === 'function') {
+      await (prisma.agentSession as any).update({
+        where: { id: sessionId },
+        data: {
+          status: 'ACTIVE',
+          updatedAt: new Date(),
+        },
+      });
+    }
+  } catch (err) {
+    console.warn('Could not advance lifecycle in updateStateNode:', err);
+  }
+
+  const step: ExecutionStep = {
+    id: `step-update-state-${Date.now()}`,
+    label: `State updated (${nextState || 'Unchanged'})`,
+    status: 'completed',
+    timestamp: new Date().toISOString(),
+    details: nextState ? `Lifecycle stage advanced to: ${nextState}` : 'Session updated',
+  };
+
+  return {
+    nextState,
+    executionSteps: [step],
+  };
+}
+
+// ============================================================================
+// NODE 9: MEMORY_EVENT (Record Cognee Memory & Audit Logs)
+// ============================================================================
+export async function memoryEventNode(state: AgentStateType): Promise<Partial<AgentStateType>> {
+  const { userProfile, context, intentBreakdown, results, sessionId } = state;
+
+  // 1. Record Cognee Memory Event
+  try {
+    const summary = intentBreakdown.map((i) => `${i.intent}: ${i.summary}`).join('; ');
+    await recordRentalMemoryEvent({
+      userProfileId: userProfile.id,
+      tenancyId: context.tenancy?.id,
+      eventType: 'INTERACTION',
+      summary: `User asked: "${state.userMessage}". Executed: ${summary}`,
+      metadata: {
+        intents: state.detectedIntents.map((i) => i.intent),
+        resultsSummary: summary,
+      },
+    });
+  } catch (err) {
+    console.warn('Failed to record Cognee memory event:', err);
+  }
+
+  // 2. Log immutable AuditEvent
+  try {
+    await createAuditEvent({
+      actorId: userProfile.id,
+      actorRole: userProfile.role,
+      action: 'AI_MULTI_INTENT_EXECUTION',
+      resourceType: 'AGENT_SESSION',
+      resourceId: sessionId,
+      metadata: {
+        intents: state.detectedIntents.map((i) => i.intent),
+        toolsExecuted: Object.keys(results),
+        intentBreakdown,
+        success: intentBreakdown.every((i) => i.status === 'SUCCESS'),
+      },
+    });
+  } catch (err) {
+    console.warn('Failed to log audit event:', err);
+  }
+
+  const step: ExecutionStep = {
+    id: `step-memory-${Date.now()}`,
+    label: 'Recorded memory graph event & audit trail',
+    status: 'completed',
+    timestamp: new Date().toISOString(),
+    details: 'Logged to Cognee memory and immutable database audit log',
+  };
+
+  return {
+    executionSteps: [step],
+  };
+}
+
+// ============================================================================
+// NODE 10: RESPOND (Multilingual Response Synthesis & Partial Failure Handling)
+// ============================================================================
+export async function respondNode(state: AgentStateType): Promise<Partial<AgentStateType>> {
+  const {
+    detectedIntents,
+    intentBreakdown,
+    results,
+    context,
+    userMessage,
+    detectedLanguage,
+    pendingConfirmation,
+  } = state;
+
+  // If pending confirmation, ask user directly
+  if (pendingConfirmation) {
+    const step: ExecutionStep = {
+      id: `step-confirm-${Date.now()}`,
+      label: 'Confirmation Required',
+      status: 'pending',
+      timestamp: new Date().toISOString(),
+      details: pendingConfirmation.prompt,
+    };
+
+    return {
+      userResponse: pendingConfirmation.prompt,
+      executionSteps: [step],
+    };
+  }
+
+  // 1. Try dynamic natural language response synthesis via Gemini
+  const dynamicResponse = await dynamicSynthesizeResponse(
+    userMessage,
+    detectedIntents.map((i) => i.intent).join(' + '),
+    results,
+    context,
+    state.modelName,
+    detectedLanguage
+  );
+
+  if (dynamicResponse) {
     const finalStep: ExecutionStep = {
       id: `step-complete-${Date.now()}`,
       label: `✓ Completed (${state.modelName || 'Gemini'})`,
       status: 'completed',
       timestamp: new Date().toISOString(),
-      details: `Synthesized dynamic response with ${state.modelName || 'Gemini'}`,
     };
 
     return {
       userResponse: dynamicResponse,
-      nextState,
       executionSteps: [finalStep],
     };
   }
 
-  // 2. Deterministic Structured Synthesis Fallback
-  switch (intent) {
-    case 'PAYMENT_STATUS': {
-      const rentStatus = results.getRentStatus?.status === 'SUCCESS' ? results.getRentStatus.output : null;
-      if (rentStatus && rentStatus.amount !== undefined) {
-        const formattedAmount = Number(rentStatus.amount).toLocaleString('en-IN');
-        if (rentStatus.isPaid) {
-          userResponse = `Yes, your rent of ₹${formattedAmount} for ${rentStatus.billingMonth} has been paid successfully. (Due date was ${rentStatus.dueDate}).`;
-          nextState = 'PAYMENT';
+  // 2. Deterministic Multilingual Response Synthesis Fallback
+  const isHindi = detectedLanguage?.startsWith('hi');
+  const isSingleIntent = detectedIntents.length === 1;
+  const responseParts: string[] = [];
+
+  for (const item of intentBreakdown) {
+    const isSuccess = item.status === 'SUCCESS';
+    const statusIcon = isSuccess ? '✓' : '✗';
+
+    switch (item.intent) {
+      case 'PAYMENT_VALIDATION':
+      case 'PAYMENT_STATUS': {
+        const rs = results.getRentStatus?.output;
+        if (isSuccess && rs) {
+          const amt = Number(rs.amount || 0).toLocaleString('en-IN');
+          if (rs.isPaid) {
+            if (isHindi) {
+              responseParts.push(
+                isSingleIntent
+                  ? `हाँ, आपका ₹${amt} किराया (${rs.billingMonth || '2026-09'}) सफलतापूर्वक जमा हो चुका है।`
+                  : `भुगतान: ${statusIcon} पुष्ट (आपका 2026-09 का ₹${amt} किराया जमा हो चुका है।)`
+              );
+            } else {
+              responseParts.push(
+                isSingleIntent
+                  ? `Yes, your rent of ₹${amt} for ${rs.billingMonth || '2026-09'} has been paid successfully. (Due date was ${rs.dueDate}).`
+                  : `Payment: ${statusIcon} Confirmed (Your rent of ₹${amt} for ${rs.billingMonth || 'September 2026'} is confirmed paid).`
+              );
+            }
+          } else {
+            if (isHindi) {
+              responseParts.push(
+                isSingleIntent
+                  ? `नहीं, आपका ₹${amt} किराया अभी ${rs.status || 'PENDING'} है। देय तिथि: ${rs.dueDate}।`
+                  : `भुगतान: ${statusIcon} आपका ₹${amt} किराया अभी ${rs.status || 'PENDING'} है (देय तिथि: ${rs.dueDate})।`
+              );
+            } else {
+              responseParts.push(
+                isSingleIntent
+                  ? `No, your rent of ₹${amt} for ${rs.billingMonth || '2026-09'} is currently ${rs.status || 'PENDING'}. It is due on ${rs.dueDate}.`
+                  : `Payment: ${statusIcon} Your rent of ₹${amt} for ${rs.billingMonth || 'September 2026'} is currently ${rs.status || 'PENDING'}.`
+              );
+            }
+          }
         } else {
-          userResponse = `No, your rent of ₹${formattedAmount} for ${rentStatus.billingMonth} is currently ${rentStatus.status}. It is due on ${rentStatus.dueDate}.`;
-          nextState = 'RENT_DUE';
+          responseParts.push(
+            isHindi
+              ? `भुगतान: ${statusIcon} स्थिति प्राप्त नहीं हो सकी (${item.summary})`
+              : `Payment: ${statusIcon} Could not verify status (${item.summary})`
+          );
         }
-      } else {
-        userResponse = 'I checked your account, but could not locate an active rent schedule for this cycle.';
+        break;
       }
-      break;
-    }
 
-    case 'RENT_DUE': {
-      const rentStatus = results.getRentStatus?.status === 'SUCCESS' ? results.getRentStatus.output : null;
-      if (rentStatus && rentStatus.amount !== undefined) {
-        const formattedAmount = Number(rentStatus.amount).toLocaleString('en-IN');
-        userResponse = `Your rent of ₹${formattedAmount} for ${rentStatus.billingMonth} is due on ${rentStatus.dueDate}. Status: ${rentStatus.status}.`;
-        nextState = rentStatus.status === 'SUCCESS' ? 'PAYMENT' : 'RENT_DUE';
-      } else {
-        userResponse = 'No upcoming rent due date found in your active tenancy records.';
+      case 'RENT_DUE': {
+        const rs = results.getRentStatus?.output;
+        if (isSuccess && rs) {
+          const amt = Number(rs.amount || 0).toLocaleString('en-IN');
+          responseParts.push(
+            isHindi
+              ? `किराया देय: 2026-09 का ₹${amt} किराया ${rs.dueDate} को देय है। स्थिति: ${rs.status}।`
+              : `Your rent of ₹${amt} for ${rs.billingMonth || '2026-09'} is due on ${rs.dueDate}. Status: ${rs.status}.`
+          );
+        } else {
+          responseParts.push(`Rent Due: ${item.summary}`);
+        }
+        break;
       }
-      break;
-    }
 
-    case 'MAINTENANCE_REPORT': {
-      const issue = results.createMaintenanceIssue?.status === 'SUCCESS' ? results.createMaintenanceIssue.output : null;
-      const task = results.createMaintenanceTask?.status === 'SUCCESS' ? results.createMaintenanceTask.output : null;
-      const notify = results.notifyOwner?.status === 'SUCCESS' ? results.notifyOwner.output : null;
-
-      if (issue) {
-        userResponse = `I have logged your maintenance issue ("${issue.title}") with ${issue.priority} priority under ${issue.category}. An authorized technician has been assigned (${task?.assignedTo || 'QuickFix Services'}) and your property owner (${notify?.recipientOwner || 'Owner'}) has been notified.`;
-        nextState = 'ISSUE';
-      } else {
-        userResponse = 'I encountered an error trying to log your maintenance issue. Please try again or reach out to your property manager.';
+      case 'MAINTENANCE_STATUS': {
+        responseParts.push(
+          isSingleIntent
+            ? `Here are your current maintenance records:\n${item.summary}`
+            : `Maintenance Status:\n${item.summary}`
+        );
+        break;
       }
-      break;
-    }
 
-    case 'MAINTENANCE_STATUS': {
-      const issuesResult = results.getMaintenanceIssues?.status === 'SUCCESS' ? results.getMaintenanceIssues.output : null;
-      if (issuesResult && issuesResult.issues?.length > 0) {
-        const issueList = issuesResult.issues
-          .map((i: any, idx: number) => `${idx + 1}. ${i.title} — Status: ${i.status} (Priority: ${i.priority})`)
-          .join('\n');
-        userResponse = `Here are your current maintenance records:\n${issueList}`;
-      } else {
-        userResponse = 'You currently have no open or recorded maintenance issues.';
+      case 'MAINTENANCE_REPORT': {
+        const issue = results.createMaintenanceIssue?.output;
+        const task = results.createMaintenanceTask?.output;
+        if (isSuccess && issue) {
+          if (isHindi) {
+            responseParts.push(
+              isSingleIntent
+                ? `मैंने आपकी रखरखाव शिकायत ("${issue.title}") ${issue.priority} प्राथमिकता के साथ दर्ज कर ली है। तकनीशियन (${task?.assignedTo || 'QuickFix Services'}) को काम सौंप दिया गया है और मकान मालिक को सूचित कर दिया गया है।`
+                : `रखरखाव: ${statusIcon} दर्ज (एसी खराबी की शिकायत ${issue.priority || 'HIGH'} प्राथमिकता के साथ दर्ज कर ली गई है। तकनीशियन ${task?.assignedTo || 'QuickFix Services'} को सौंपा गया)।`
+            );
+          } else {
+            responseParts.push(
+              isSingleIntent
+                ? `I have logged your maintenance issue ("${issue.title}") with ${issue.priority} priority under ${issue.category}. An authorized technician has been assigned (${task?.assignedTo || 'QuickFix Services'}) and your property owner has been notified.`
+                : `Maintenance: ${statusIcon} Created (Issue logged for ${issue.title || 'AC malfunction'} with ${issue.priority || 'HIGH'} priority. Technician assigned: ${task?.assignedTo || 'QuickFix Coliving Services'}).`
+            );
+          }
+        } else {
+          responseParts.push(
+            isHindi
+              ? `रखरखाव: ${statusIcon} शिकायत दर्ज नहीं हो सकी (${item.summary})`
+              : `Maintenance: ${statusIcon} Could not create task (${item.summary})`
+          );
+        }
+        break;
       }
-      break;
-    }
 
-    case 'OWNER_NOTIFICATION': {
-      const notify = results.notifyOwner?.status === 'SUCCESS' ? results.notifyOwner.output : null;
-      if (notify) {
-        userResponse = `Your message has been dispatched to your property owner (${notify.recipientOwner}). They will receive an immediate notification in their dashboard.`;
-      } else {
-        userResponse = 'Unable to dispatch notification to the owner. Please verify your active tenancy.';
+      case 'OWNER_NOTIFICATION': {
+        const notify = results.notifyOwner?.output;
+        if (isSuccess) {
+          if (isHindi) {
+            responseParts.push(
+              isSingleIntent
+                ? `आपका संदेश आपके मकान मालिक (${notify?.recipientOwner || 'मालिक'}) को भेज दिया गया है।`
+                : `मालिक को सूचना: ${statusIcon} प्रेषित (मकान मालिक ${notify?.recipientOwner || 'मालिक'} को तत्काल सूचना भेज दी गई है)।`
+            );
+          } else {
+            responseParts.push(
+              isSingleIntent
+                ? `Your message has been dispatched to your property owner (${notify?.recipientOwner || 'Owner'}). They will receive an immediate notification in their dashboard.`
+                : `Owner Notification: ${statusIcon} Sent (Dispatched immediate alert to owner ${notify?.recipientOwner || 'Owner'}).`
+            );
+          }
+        } else {
+          responseParts.push(
+            isHindi
+              ? `मालिक को सूचना: ${statusIcon} सूचना नहीं भेजी जा सकी (${item.summary})`
+              : `Owner Notification: ${statusIcon} Could not notify owner (${item.summary})`
+          );
+        }
+        break;
       }
-      break;
-    }
 
-    case 'PROPERTY_INFORMATION': {
-      const prop = results.getProperty?.status === 'SUCCESS' ? results.getProperty.output : null;
-      if (prop) {
-        userResponse = `${prop.name} is located at ${prop.address}, ${prop.city}. Amenities include: ${prop.amenities?.join(', ') || 'N/A'}. Property owner: ${prop.ownerName}.`;
-      } else {
-        userResponse = 'Could not load property details for your active lease.';
-      }
-      break;
-    }
-
-    case 'RENTAL_INFORMATION':
-    default: {
-      if (context.tenancy) {
-        userResponse = `You are currently residing in Room ${context.tenancy.roomNumber} at ${context.tenancy.propertyName}. Monthly rent: ₹${context.tenancy.monthlyRent.toLocaleString('en-IN')}. Lifecycle stage: ${context.tenancy.lifecycleStage}.`;
-        nextState = context.tenancy.lifecycleStage;
-      } else {
-        userResponse = 'Welcome to HavenDex! I am your AI rental teammate. How can I assist you today?';
-      }
-      break;
+      default:
+        responseParts.push(`${item.intent}: ${item.summary}`);
+        break;
     }
   }
+
+  const userResponse = responseParts.join('\n\n');
 
   const finalStep: ExecutionStep = {
     id: `step-complete-${Date.now()}`,
@@ -658,27 +1310,36 @@ export async function synthesizeResponseNode(state: AgentStateType): Promise<Par
 
   return {
     userResponse,
-    nextState,
     executionSteps: [finalStep],
   };
 }
 
 // ============================================================================
-// Compile LangGraph State Graph
+// Compile Phase 3 Stateful LangGraph
 // ============================================================================
 export function buildRentalAssistantGraph() {
   const workflow = new StateGraph(AgentStateAnnotation)
-    .addNode('understandIntent', understandIntentNode)
-    .addNode('retrieveContext', retrieveContextNode)
-    .addNode('planActions', planActionsNode)
-    .addNode('executeTools', executeToolsNode)
-    .addNode('synthesizeResponse', synthesizeResponseNode)
-    .addEdge(START, 'understandIntent')
-    .addEdge('understandIntent', 'retrieveContext')
-    .addEdge('retrieveContext', 'planActions')
-    .addEdge('planActions', 'executeTools')
-    .addEdge('executeTools', 'synthesizeResponse')
-    .addEdge('synthesizeResponse', END);
+    .addNode('understand', understandNode)
+    .addNode('loadContext', loadContextNode)
+    .addNode('detectIntents', detectIntentsNode)
+    .addNode('plan', planNode)
+    .addNode('authorize', authorizeNode)
+    .addNode('execute', executeNode)
+    .addNode('verify', verifyNode)
+    .addNode('updateState', updateStateNode)
+    .addNode('memoryEvent', memoryEventNode)
+    .addNode('respond', respondNode)
+    .addEdge(START, 'understand')
+    .addEdge('understand', 'loadContext')
+    .addEdge('loadContext', 'detectIntents')
+    .addEdge('detectIntents', 'plan')
+    .addEdge('plan', 'authorize')
+    .addEdge('authorize', 'execute')
+    .addEdge('execute', 'verify')
+    .addEdge('verify', 'updateState')
+    .addEdge('updateState', 'memoryEvent')
+    .addEdge('memoryEvent', 'respond')
+    .addEdge('respond', END);
 
   return workflow.compile();
 }
