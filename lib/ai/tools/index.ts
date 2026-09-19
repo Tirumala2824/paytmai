@@ -1,9 +1,9 @@
 import { z } from 'zod';
 import prisma from '@/lib/db';
-import { MaintenanceStatus, RentalLifecycle, UserRole } from '@prisma/client';
+import { MaintenanceStatus, RentalLifecycle, UserRole, VerificationMethod } from '@prisma/client';
 import { canAccessProperty, canAccessTenancy, canAccessMaintenanceIssue, canAccessPayment } from '@/lib/auth/abac';
 import { getTenancyWithDetails } from '@/lib/rental/service';
-import { reportMaintenanceIssue, assignMaintenanceTask, updateMaintenanceStatus } from '@/lib/maintenance/service';
+import { reportMaintenanceIssue, assignMaintenanceTask, updateMaintenanceStatus, verifyMaintenanceIssue } from '@/lib/maintenance/service';
 import { createAuditEvent } from '@/lib/audit/service';
 import { ToolExecutionContext, ToolCallResult } from '../types';
 
@@ -708,6 +708,7 @@ export const createMaintenanceIssueSchema = z.object({
   description: z.string().min(5),
   category: z.string().optional().default('GENERAL'),
   priority: z.string().optional().default('MEDIUM'),
+  isRepeated: z.boolean().optional(),
 });
 
 export async function executeCreateMaintenanceIssue(
@@ -725,8 +726,9 @@ export async function executeCreateMaintenanceIssue(
       title: input.title,
       description: input.description,
       category: input.category || 'GENERAL',
-      priority: input.priority || 'MEDIUM',
+      priority: input.priority || (input.isRepeated ? 'HIGH' : 'MEDIUM'),
       reporterUserProfileId: context.userProfile.id,
+      isRepeated: input.isRepeated,
     });
 
     const output = {
@@ -735,6 +737,7 @@ export async function executeCreateMaintenanceIssue(
       category: issue.category,
       priority: issue.priority,
       status: issue.status,
+      isRepeated: issue.isRepeated,
       tenancyId: issue.tenancyId,
       createdAt: issue.createdAt.toISOString(),
     };
@@ -745,7 +748,7 @@ export async function executeCreateMaintenanceIssue(
       status: 'SUCCESS',
       input,
       output,
-      summary: `Created maintenance issue: "${output.title}" (Priority: ${output.priority}, Category: ${output.category})`,
+      summary: `Created maintenance issue: "${output.title}" (Priority: ${output.priority}, Category: ${output.category})${output.isRepeated ? ' [Flagged as Repeated Issue]' : ''}`,
     };
   } catch (err: any) {
     await logAgentAction(context.sessionId, 'MUTATION', toolName, input, { error: err.message }, 'FAILED');
@@ -968,6 +971,10 @@ export async function executeUpdateMaintenanceTask(
 export const verifyMaintenanceResolutionSchema = z.object({
   issueId: z.string().optional(),
   confirmed: z.boolean().default(true),
+  verificationMethod: z.nativeEnum(VerificationMethod).optional().default(VerificationMethod.TENANT_CONFIRMATION),
+  evidence: z.string().optional(),
+  confidence: z.number().optional(),
+  resolution: z.string().optional(),
   feedback: z.string().optional(),
 });
 
@@ -998,21 +1005,26 @@ export async function executeVerifyMaintenanceResolution(
       return { toolName, status: 'REJECTED', input, output: {}, error: 'Unauthorized issue access' };
     }
 
-    const targetStatus = input.confirmed ? MaintenanceStatus.VERIFIED : MaintenanceStatus.IN_PROGRESS;
-
-    const updatedIssue = await updateMaintenanceStatus({
+    const result = await verifyMaintenanceIssue({
       issueId,
-      status: targetStatus,
+      verificationMethod: input.verificationMethod || VerificationMethod.TENANT_CONFIRMATION,
+      verifiedBy: context.userProfile.id,
+      evidence: input.evidence || input.feedback || 'Tenant confirmed resolution via AI Assistant',
+      confidence: input.confidence,
+      notes: input.feedback,
+      confirmed: input.confirmed,
+      resolution: input.resolution,
       actor: { id: context.userProfile.id, role: context.userProfile.role },
-      notes: input.feedback || 'Tenant verified resolution via AI Assistant',
     });
 
     const output = {
-      issueId: updatedIssue.id,
-      title: updatedIssue.title,
-      status: updatedIssue.status,
-      verified: input.confirmed,
-      feedback: input.feedback,
+      issueId,
+      status: result.issueStatus,
+      verificationMethod: result.verification.verificationMethod,
+      verified: result.confirmed,
+      confidence: result.verification.confidence,
+      evidence: result.verification.evidence,
+      resolution: result.resolution,
     };
 
     await logAgentAction(context.sessionId, 'MUTATION', toolName, input, output, 'EXECUTED');
@@ -1021,7 +1033,9 @@ export async function executeVerifyMaintenanceResolution(
       status: 'SUCCESS',
       input,
       output,
-      summary: `Maintenance issue "${output.title}" verified and closed.`,
+      summary: result.confirmed
+        ? `Maintenance issue verified (${result.verification.verificationMethod}) and closed.`
+        : `Maintenance issue marked as still in progress.`,
     };
   } catch (err: any) {
     await logAgentAction(context.sessionId, 'MUTATION', toolName, input, { error: err.message }, 'FAILED');

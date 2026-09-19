@@ -15,7 +15,7 @@ import {
   dynamicAnalyzeMultiIntents,
   dynamicSynthesizeResponse,
 } from './llm';
-import { recordRentalMemoryEvent } from './memory/cognee';
+import { memoryService } from './memory/service';
 import { createAuditEvent } from '@/lib/audit/service';
 import { canAccessProperty, canAccessTenancy } from '@/lib/auth/abac';
 import { advanceRentalLifecycle } from '@/lib/rental/service';
@@ -110,7 +110,7 @@ export async function understandNode(state: AgentStateType): Promise<Partial<Age
 }
 
 // ============================================================================
-// NODE 2: LOAD_CONTEXT (Retrieve Rental Context)
+// NODE 2: LOAD_CONTEXT (Retrieve Rental Context via MemoryService)
 // ============================================================================
 export async function loadContextNode(state: AgentStateType): Promise<Partial<AgentStateType>> {
   const { userProfile } = state;
@@ -187,6 +187,21 @@ export async function loadContextNode(state: AgentStateType): Promise<Partial<Ag
     console.error('Error retrieving rental context in LangGraph:', err);
   }
 
+  // Phase 4: Retrieve relevant context via MemoryService abstraction
+  let memoryContextResult: any = null;
+  try {
+    memoryContextResult = await memoryService.retrieveRelevantContext({
+      userProfileId: userProfile.id,
+      tenancyId: tenancyRecord?.id,
+      userMessage: state.userMessage,
+    });
+  } catch (memErr) {
+    console.warn('Memory retrieval error in LangGraph:', memErr);
+  }
+
+  const prevIssue = memoryContextResult?.previousRelatedIssue;
+  const hasPreviousIssue = !!prevIssue;
+
   const context: AgentRentalContext = {
     user: {
       id: userProfile.id,
@@ -225,16 +240,23 @@ export async function loadContextNode(state: AgentStateType): Promise<Partial<Ag
       status: m.status,
       createdAt: m.createdAt.toISOString(),
     })),
+    relevantMemories: memoryContextResult?.relevantMemories || [],
+    previousRelatedIssue: prevIssue,
+    isRepeatedIssue: hasPreviousIssue,
   };
+
+  const stepDetails = prevIssue
+    ? `Previous related maintenance issue found: "${prevIssue.title}" (${prevIssue.status}: ${prevIssue.resolution || 'Service completed'})`
+    : context.tenancy
+    ? `Active lease at ${context.tenancy.propertyName} (Room ${context.tenancy.roomNumber})`
+    : 'No active lease loaded';
 
   const step: ExecutionStep = {
     id: `step-context-${Date.now()}`,
-    label: 'Rental context loaded',
+    label: prevIssue ? 'Previous related maintenance issue found' : 'Rental context loaded',
     status: 'completed',
     timestamp: new Date().toISOString(),
-    details: context.tenancy
-      ? `Active lease at ${context.tenancy.propertyName} (Room ${context.tenancy.roomNumber})`
-      : 'No active lease loaded',
+    details: stepDetails,
   };
 
   return {
@@ -720,10 +742,11 @@ export async function executeNode(state: AgentStateType): Promise<Partial<AgentS
     if (!resolvedInput) {
       if (toolName === 'createMaintenanceIssue') {
         input = {
-          title: entities.title || 'Maintenance issue reported by tenant',
+          title: entities.title || (context.previousRelatedIssue ? context.previousRelatedIssue.title : 'Maintenance issue reported by tenant'),
           description: entities.description || state.userMessage,
-          category: entities.category || 'GENERAL',
-          priority: entities.priority || 'MEDIUM',
+          category: entities.category || (context.previousRelatedIssue ? 'APPLIANCE' : 'GENERAL'),
+          priority: context.isRepeatedIssue ? 'HIGH' : (entities.priority || 'MEDIUM'),
+          isRepeated: context.isRepeatedIssue || entities.isRepeated || false,
         };
       } else if (toolName === 'getRentStatus') {
         input = { tenancyId: context.tenancy?.id };
@@ -1013,12 +1036,26 @@ export async function updateStateNode(state: AgentStateType): Promise<Partial<Ag
     // If maintenance issue was created, advance lifecycle to ISSUE
     if (results.createMaintenanceIssue?.status === 'SUCCESS' && context.tenancy?.id) {
       nextState = 'ISSUE';
-      await advanceRentalLifecycle(
-        context.tenancy.id,
-        'ISSUE' as any,
-        { id: userProfile.id, role: userProfile.role, name: userProfile.name },
-        `Maintenance issue reported: ${results.createMaintenanceIssue.output?.title}`
-      );
+      try {
+        const currentTenancy = await prisma.tenancy.findUnique({
+          where: { id: context.tenancy.id },
+          select: { lifecycleStage: true },
+        });
+        if (
+          currentTenancy?.lifecycleStage === 'RENT_DUE' ||
+          currentTenancy?.lifecycleStage === 'PAYMENT' ||
+          currentTenancy?.lifecycleStage === 'VERIFIED'
+        ) {
+          await advanceRentalLifecycle(
+            context.tenancy.id,
+            'ISSUE' as any,
+            { id: userProfile.id, role: userProfile.role, name: userProfile.name },
+            `Maintenance issue reported: ${results.createMaintenanceIssue.output?.title}`
+          );
+        }
+      } catch (lifecycleErr) {
+        console.warn('Could not advance lifecycle in updateStateNode:', lifecycleErr);
+      }
     } else if (results.getRentStatus?.status === 'SUCCESS') {
       nextState = results.getRentStatus.output?.isPaid ? 'PAYMENT' : 'RENT_DUE';
     } else if (context.tenancy?.lifecycleStage) {
@@ -1059,21 +1096,24 @@ export async function updateStateNode(state: AgentStateType): Promise<Partial<Ag
 export async function memoryEventNode(state: AgentStateType): Promise<Partial<AgentStateType>> {
   const { userProfile, context, intentBreakdown, results, sessionId } = state;
 
-  // 1. Record Cognee Memory Event
+  // 1. Record Cognee Memory Event via MemoryService abstraction
   try {
     const summary = intentBreakdown.map((i) => `${i.intent}: ${i.summary}`).join('; ');
-    await recordRentalMemoryEvent({
+    await memoryService.remember({
       userProfileId: userProfile.id,
       tenancyId: context.tenancy?.id,
-      eventType: 'INTERACTION',
+      propertyId: context.tenancy?.propertyId,
+      memoryType: 'INTERACTION_SUMMARY',
+      key: 'ASSISTANT_SESSION',
       summary: `User asked: "${state.userMessage}". Executed: ${summary}`,
-      metadata: {
+      content: {
         intents: state.detectedIntents.map((i) => i.intent),
         resultsSummary: summary,
+        isRepeatedIssue: context.isRepeatedIssue ?? false,
       },
     });
   } catch (err) {
-    console.warn('Failed to record Cognee memory event:', err);
+    console.warn('Failed to record memory event:', err);
   }
 
   // 2. Log immutable AuditEvent
@@ -1149,6 +1189,18 @@ export async function respondNode(state: AgentStateType): Promise<Partial<AgentS
   );
 
   if (dynamicResponse) {
+    const prev = context.previousRelatedIssue;
+    let finalDynamic = dynamicResponse;
+    if (
+      prev &&
+      !dynamicResponse.includes('Previous related') &&
+      (detectedIntents.some((i) => i.intent === 'MAINTENANCE_REPORT' || i.intent === 'MAINTENANCE_STATUS') ||
+        userMessage.toLowerCase().includes('ac') ||
+        userMessage.toLowerCase().includes('broken'))
+    ) {
+      finalDynamic = `Previous related maintenance issue found.\n\nYou previously reported "${prev.title}" for this property (Status: ${prev.status}, Resolution: ${prev.resolution || 'AC service completed'}). Since this issue has recurred, I have escalated it with HIGH priority to the property owner and technician.\n\n${dynamicResponse}`;
+    }
+
     const finalStep: ExecutionStep = {
       id: `step-complete-${Date.now()}`,
       label: `✓ Completed (${state.modelName || 'Gemini'})`,
@@ -1157,7 +1209,7 @@ export async function respondNode(state: AgentStateType): Promise<Partial<AgentS
     };
 
     return {
-      userResponse: dynamicResponse,
+      userResponse: finalDynamic,
       executionSteps: [finalStep],
     };
   }
@@ -1299,7 +1351,19 @@ export async function respondNode(state: AgentStateType): Promise<Partial<AgentS
     }
   }
 
-  const userResponse = responseParts.join('\n\n');
+  // Phase 4: Prepend explicit historical context notice when previous related issue is retrieved
+  const prev = context.previousRelatedIssue;
+  let memoryNotice = '';
+  if (
+    prev &&
+    (detectedIntents.some((i) => i.intent === 'MAINTENANCE_REPORT' || i.intent === 'MAINTENANCE_STATUS') ||
+      userMessage.toLowerCase().includes('ac') ||
+      userMessage.toLowerCase().includes('broken'))
+  ) {
+    memoryNotice = `Previous related maintenance issue found.\n\nYou previously reported "${prev.title}" for this property (Status: ${prev.status}, Resolution: ${prev.resolution || 'AC service completed'}). Since this issue has recurred, I have escalated it with HIGH priority to the property owner and technician.\n\n`;
+  }
+
+  const userResponse = memoryNotice + responseParts.join('\n\n');
 
   const finalStep: ExecutionStep = {
     id: `step-complete-${Date.now()}`,
