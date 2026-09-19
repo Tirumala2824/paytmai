@@ -24,6 +24,8 @@ import {
 } from 'lucide-react';
 import { AIExecutionResponse, ExecutionStep } from '@/lib/ai/types';
 import { LIFECYCLE_STAGE_LABELS } from '@/lib/rental/lifecycle';
+import { VoiceAssistant } from '@/components/voice/VoiceAssistant';
+import { Mic, MessageSquare } from 'lucide-react';
 
 interface ChatMessage {
   id: string;
@@ -37,6 +39,7 @@ interface ChatMessage {
 }
 
 export default function AssistantPage() {
+  const [activeTab, setActiveTab] = useState<'voice' | 'chat'>('voice');
   const [messages, setMessages] = useState<ChatMessage[]>([
     {
       id: 'welcome-msg',
@@ -183,29 +186,55 @@ export default function AssistantPage() {
                 HavenDex AI Assistant
               </h1>
               <Badge className="bg-indigo-500/20 text-indigo-300 border-indigo-500/30 text-[10px] uppercase font-bold">
-                Phase 2 Active
+                Phase 3 Active
               </Badge>
             </div>
             <p className="text-xs text-slate-400">
-              One AI teammate for the entire rental relationship.
+              One AI teammate for the entire rental relationship • Multilingual Voice &amp; Multi-Intent
             </p>
           </div>
         </div>
 
         <div className="flex items-center gap-2 flex-wrap">
+          {/* Mode Switcher Tabs */}
+          <div className="p-1 rounded-xl bg-slate-950/80 border border-slate-800 flex items-center gap-1">
+            <button
+              onClick={() => setActiveTab('voice')}
+              className={`flex items-center gap-1.5 px-3 py-1 rounded-lg text-xs font-semibold transition-all ${
+                activeTab === 'voice'
+                  ? 'bg-indigo-600 text-white shadow-md shadow-indigo-600/30'
+                  : 'text-slate-400 hover:text-white'
+              }`}
+            >
+              <Mic className="h-3.5 w-3.5" />
+              <span>Voice Mode</span>
+            </button>
+            <button
+              onClick={() => setActiveTab('chat')}
+              className={`flex items-center gap-1.5 px-3 py-1 rounded-lg text-xs font-semibold transition-all ${
+                activeTab === 'chat'
+                  ? 'bg-indigo-600 text-white shadow-md shadow-indigo-600/30'
+                  : 'text-slate-400 hover:text-white'
+              }`}
+            >
+              <MessageSquare className="h-3.5 w-3.5" />
+              <span>Text Chat</span>
+            </button>
+          </div>
+
           <div className="px-3 py-1.5 rounded-lg bg-slate-900/80 border border-slate-800 text-xs flex items-center gap-2">
             <span
               className={`h-2 w-2 rounded-full ${
                 rentalContext?.llmActive ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400'
               }`}
             />
-            <span className="text-slate-300">AI Engine:</span>
+            <span className="text-slate-300">AI:</span>
             <span
               className={`font-semibold ${
                 rentalContext?.llmActive ? 'text-emerald-400' : 'text-amber-400'
               }`}
             >
-              {rentalContext?.llmActive ? 'Gemini Active' : 'Safety Mode (Set GEMINI_API_KEY in .env)'}
+              {rentalContext?.llmActive ? 'Gemini + Sarvam' : 'Safety Mode (Sarvam + LangGraph)'}
             </span>
           </div>
 
@@ -228,190 +257,181 @@ export default function AssistantPage() {
           <div className="px-3 py-1.5 rounded-lg bg-slate-900/80 border border-slate-800 text-xs flex items-center gap-2">
             <ShieldCheck className="h-3.5 w-3.5 text-indigo-400" />
             <span className="text-slate-400">RBAC/ABAC:</span>
-            <span className="font-semibold text-indigo-300">Server-Enforced</span>
+            <span className="font-semibold text-indigo-300">Enforced</span>
           </div>
         </div>
       </div>
 
       {/* Main Grid: Chat on Left, Context & Inspector on Right */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
-        {/* Chat Feed (7 cols on lg) */}
-        <div className="lg:col-span-7 flex flex-col rounded-2xl bg-slate-900/40 border border-slate-800/80 backdrop-blur-xl h-[750px] overflow-hidden">
-          {/* Header */}
-          <div className="p-4 border-b border-slate-800/80 bg-slate-950/60 flex items-center justify-between">
-            <div className="flex items-center gap-2">
-              <Zap className="h-4 w-4 text-indigo-400" />
-              <span className="text-xs font-bold uppercase tracking-wider text-slate-300">
-                AI Rental Session
-              </span>
-              {activeSessionId && (
-                <span className="text-[10px] font-mono text-slate-500 truncate max-w-[150px]">
-                  ({activeSessionId.slice(0, 8)}...)
-                </span>
-              )}
-            </div>
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={() => {
-                setMessages([
-                  {
-                    id: 'welcome-msg-fresh',
-                    sender: 'assistant',
-                    text: 'Session refreshed! How can I assist you with your rental today?',
-                    timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-                  },
-                ]);
-                setActiveSessionId(undefined);
+        {/* Left Column: Voice Assistant OR Chat Feed (7 cols on lg) */}
+        <div className="lg:col-span-7">
+          {activeTab === 'voice' ? (
+            <VoiceAssistant
+              selectedModel={selectedModel}
+              activeSessionId={activeSessionId}
+              onExecutionComplete={(res) => {
+                if (res.sessionId) setActiveSessionId(res.sessionId);
+                if (res.toolCalls) {
+                  setRecentToolCalls((prev) => [...res.toolCalls, ...prev].slice(0, 10));
+                }
+                fetchContext();
               }}
-              className="text-xs text-slate-400 hover:text-white h-7 gap-1"
-            >
-              <RefreshCw className="h-3 w-3" />
-              <span>New Session</span>
-            </Button>
-          </div>
-
-          {/* Quick Command Suggestions */}
-          <div className="px-4 py-2.5 bg-slate-950/40 border-b border-slate-800/40 overflow-x-auto flex items-center gap-2 text-xs no-scrollbar">
-            <span className="text-[10px] font-bold uppercase tracking-wider text-slate-500 shrink-0">
-              Suggestions:
-            </span>
-            {suggestedCommands.map((cmd) => (
-              <button
-                key={cmd}
-                onClick={() => handleSendMessage(cmd)}
-                disabled={isLoading}
-                className="px-2.5 py-1 rounded-full bg-slate-800/60 hover:bg-indigo-600/20 hover:border-indigo-500/40 border border-slate-700/60 text-slate-300 hover:text-indigo-200 transition-colors shrink-0 text-xs cursor-pointer disabled:opacity-50"
-              >
-                {cmd}
-              </button>
-            ))}
-          </div>
-
-          {/* Messages Area */}
-          <div className="flex-1 p-4 overflow-y-auto space-y-4">
-            {messages.map((msg) => (
-              <div
-                key={msg.id}
-                className={`flex gap-3 ${msg.sender === 'user' ? 'justify-end' : 'justify-start'}`}
-              >
-                {msg.sender === 'assistant' && (
-                  <div className="h-8 w-8 rounded-xl bg-gradient-to-tr from-indigo-600 to-violet-500 flex items-center justify-center text-white shrink-0 mt-0.5 shadow-md shadow-indigo-600/20">
-                    <Sparkles className="h-4 w-4" />
-                  </div>
-                )}
-
-                <div className={`max-w-[85%] space-y-2 ${msg.sender === 'user' ? 'items-end' : 'items-start'}`}>
-                  {/* Message Bubble */}
-                  <div
-                    className={`p-3.5 rounded-2xl text-sm leading-relaxed ${
-                      msg.sender === 'user'
-                        ? 'bg-indigo-600 text-white rounded-br-none shadow-md shadow-indigo-600/20'
-                        : 'bg-slate-950/90 border border-slate-800 text-slate-200 rounded-bl-none shadow-sm'
-                    }`}
-                  >
-                    <p className="whitespace-pre-wrap">{msg.text}</p>
-                  </div>
-
-                  {/* Execution Stepper for Assistant Responses */}
-                  {msg.executionSteps && msg.executionSteps.length > 0 && (
-                    <div className="p-3 rounded-xl bg-slate-950/60 border border-slate-800/60 text-xs space-y-2">
-                      <div className="flex items-center justify-between text-[10px] font-bold uppercase tracking-wider text-slate-400">
-                        <span className="flex items-center gap-1.5">
-                          <Terminal className="h-3 w-3 text-indigo-400" />
-                          <span>AI Execution Flow</span>
-                        </span>
-                        {msg.intent && (
-                          <span className="text-indigo-400 font-mono">[{msg.intent}]</span>
-                        )}
-                      </div>
-
-                      <div className="space-y-1.5 pt-1">
-                        {msg.executionSteps.map((step) => (
-                          <div key={step.id} className="flex items-center gap-2 text-slate-300">
-                            <span className="h-4 w-4 rounded-full bg-emerald-500/20 text-emerald-400 flex items-center justify-center shrink-0">
-                              <CheckCircle2 className="h-3 w-3" />
-                            </span>
-                            <span className="font-medium">{step.label}</span>
-                            {step.details && (
-                              <span className="text-slate-500 text-[11px] truncate">
-                                — {step.details}
-                              </span>
-                            )}
-                          </div>
-                        ))}
-                      </div>
-                    </div>
+            />
+          ) : (
+            <div className="flex flex-col rounded-2xl bg-slate-900/40 border border-slate-800/80 backdrop-blur-xl h-[750px] overflow-hidden">
+              {/* Header */}
+              <div className="p-4 border-b border-slate-800/80 bg-slate-950/60 flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <Zap className="h-4 w-4 text-indigo-400" />
+                  <span className="text-xs font-bold uppercase tracking-wider text-slate-300">
+                    AI Rental Session
+                  </span>
+                  {activeSessionId && (
+                    <span className="text-[10px] font-mono text-slate-500 truncate max-w-[150px]">
+                      ({activeSessionId.slice(0, 8)}...)
+                    </span>
                   )}
-
-                  {/* Timestamp */}
-                  <div
-                    className={`text-[10px] text-slate-500 px-1 ${
-                      msg.sender === 'user' ? 'text-right' : 'text-left'
-                    }`}
-                  >
-                    {msg.timestamp}
-                  </div>
                 </div>
-
-                {msg.sender === 'user' && (
-                  <div className="h-8 w-8 rounded-xl bg-indigo-500/20 border border-indigo-500/30 flex items-center justify-center text-indigo-300 shrink-0 mt-0.5 text-xs font-bold">
-                    ME
-                  </div>
-                )}
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => {
+                    setMessages([
+                      {
+                        id: 'welcome-msg-fresh',
+                        sender: 'assistant',
+                        text: 'Session refreshed! How can I assist you with your rental today?',
+                        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+                      },
+                    ]);
+                    setActiveSessionId(undefined);
+                  }}
+                  className="text-xs text-slate-400 hover:text-white h-7 gap-1"
+                >
+                  <RefreshCw className="h-3 w-3" />
+                  <span>New Session</span>
+                </Button>
               </div>
-            ))}
 
-            {/* Loading Indicator with Animated Stepper */}
-            {isLoading && (
-              <div className="flex gap-3 justify-start items-start">
-                <div className="h-8 w-8 rounded-xl bg-gradient-to-tr from-indigo-600 to-violet-500 flex items-center justify-center text-white shrink-0 mt-0.5 animate-pulse">
-                  <Sparkles className="h-4 w-4" />
-                </div>
-                <div className="p-3.5 rounded-2xl bg-slate-950/80 border border-slate-800 text-slate-300 text-sm space-y-2">
-                  <div className="flex items-center gap-2">
-                    <RefreshCw className="h-3.5 w-3.5 animate-spin text-indigo-400" />
-                    <span className="font-semibold text-xs text-white">HavenDex is working...</span>
-                  </div>
-                  <div className="text-xs text-slate-400 space-y-1">
-                    <div className="flex items-center gap-2">
-                      <span className="h-1.5 w-1.5 rounded-full bg-indigo-400 animate-ping" />
-                      <span>Understanding request & retrieving rental context...</span>
+              {/* Quick Command Suggestions */}
+              <div className="px-4 py-2.5 bg-slate-950/40 border-b border-slate-800/40 overflow-x-auto flex items-center gap-2 text-xs no-scrollbar">
+                <span className="text-[10px] font-bold uppercase tracking-wider text-slate-500 shrink-0">
+                  Suggestions:
+                </span>
+                {suggestedCommands.map((cmd) => (
+                  <button
+                    key={cmd}
+                    onClick={() => handleSendMessage(cmd)}
+                    disabled={isLoading}
+                    className="px-2.5 py-1 rounded-full bg-slate-800/60 hover:bg-indigo-600/20 hover:border-indigo-500/40 border border-slate-700/60 text-slate-300 hover:text-indigo-200 transition-colors shrink-0 text-xs cursor-pointer disabled:opacity-50"
+                  >
+                    {cmd}
+                  </button>
+                ))}
+              </div>
+
+              {/* Messages Area */}
+              <div className="flex-1 p-4 overflow-y-auto space-y-4">
+                {messages.map((msg) => (
+                  <div
+                    key={msg.id}
+                    className={`flex gap-3 ${msg.sender === 'user' ? 'justify-end' : 'justify-start'}`}
+                  >
+                    {msg.sender === 'assistant' && (
+                      <div className="h-8 w-8 rounded-xl bg-gradient-to-tr from-indigo-600 to-violet-500 flex items-center justify-center text-white shrink-0 mt-0.5 shadow-md shadow-indigo-600/20">
+                        <Sparkles className="h-4 w-4" />
+                      </div>
+                    )}
+
+                    <div className="max-w-[80%] space-y-2">
+                      <div
+                        className={`p-4 rounded-2xl text-xs sm:text-sm leading-relaxed ${
+                          msg.sender === 'user'
+                            ? 'bg-indigo-600 text-white rounded-tr-none shadow-lg shadow-indigo-600/20'
+                            : 'bg-slate-900 border border-slate-800 text-slate-200 rounded-tl-none shadow-sm'
+                        }`}
+                      >
+                        <div className="whitespace-pre-line">{msg.text}</div>
+                        <div
+                          className={`text-[10px] mt-2 font-mono ${
+                            msg.sender === 'user' ? 'text-indigo-200' : 'text-slate-500'
+                          }`}
+                        >
+                          {msg.timestamp}
+                        </div>
+                      </div>
+
+                      {/* Execution Steps */}
+                      {msg.executionSteps && msg.executionSteps.length > 0 && (
+                        <div className="p-3 rounded-xl bg-slate-950/60 border border-slate-800/60 space-y-1.5 text-xs">
+                          <div className="flex items-center gap-1.5 text-[10px] font-bold text-slate-400 uppercase tracking-wider">
+                            <Layers className="h-3 w-3 text-indigo-400" />
+                            <span>10-Node LangGraph Execution</span>
+                          </div>
+                          <div className="space-y-1">
+                            {msg.executionSteps.map((step) => (
+                              <div
+                                key={step.id}
+                                className="flex items-center justify-between text-[11px] py-0.5"
+                              >
+                                <span className="text-slate-300 flex items-center gap-1.5">
+                                  <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
+                                  {step.label}
+                                </span>
+                                {step.details && (
+                                  <span className="text-[10px] text-slate-500 max-w-[180px] truncate">
+                                    {step.details}
+                                  </span>
+                                )}
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
                     </div>
                   </div>
-                </div>
+                ))}
+                {isLoading && (
+                  <div className="flex gap-3 justify-start items-center">
+                    <div className="h-8 w-8 rounded-xl bg-gradient-to-tr from-indigo-600 to-violet-500 flex items-center justify-center text-white shrink-0 shadow-md shadow-indigo-600/20">
+                      <Sparkles className="h-4 w-4 animate-spin" />
+                    </div>
+                    <div className="p-3.5 rounded-2xl bg-slate-900 border border-slate-800 rounded-tl-none text-xs text-slate-400 flex items-center gap-2">
+                      <span className="h-2 w-2 rounded-full bg-indigo-500 animate-ping" />
+                      <span>HavenDex AI is analyzing context and executing authorized tools...</span>
+                    </div>
+                  </div>
+                )}
+                <div ref={messagesEndRef} />
               </div>
-            )}
 
-            <div ref={messagesEndRef} />
-          </div>
-
-          {/* Input Area */}
-          <div className="p-4 border-t border-slate-800/80 bg-slate-950/80">
-            <form
-              onSubmit={(e) => {
-                e.preventDefault();
-                handleSendMessage();
-              }}
-              className="flex gap-2"
-            >
-              <input
-                type="text"
-                value={inputMessage}
-                onChange={(e) => setInputMessage(e.target.value)}
-                placeholder="Ask HavenDex anything about your rent, issues, or lease..."
-                disabled={isLoading}
-                className="flex-1 bg-slate-900 border border-slate-800 rounded-xl px-4 py-2.5 text-sm text-slate-100 placeholder:text-slate-500 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 transition-all"
-              />
-              <Button
-                type="submit"
-                disabled={isLoading || !inputMessage.trim()}
-                className="bg-indigo-600 hover:bg-indigo-500 text-white px-4 rounded-xl shadow-md shadow-indigo-600/20"
+              {/* Chat Input */}
+              <form
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  handleSendMessage();
+                }}
+                className="p-3 border-t border-slate-800/80 bg-slate-950/60 flex items-center gap-2"
               >
-                <Send className="h-4 w-4" />
-              </Button>
-            </form>
-          </div>
+                <input
+                  type="text"
+                  value={inputMessage}
+                  onChange={(e) => setInputMessage(e.target.value)}
+                  placeholder="Ask HavenDex anything about your rent, issues, or lease..."
+                  disabled={isLoading}
+                  className="flex-1 bg-slate-900 border border-slate-800 rounded-xl px-4 py-2.5 text-sm text-slate-100 placeholder:text-slate-500 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 transition-all"
+                />
+                <Button
+                  type="submit"
+                  disabled={isLoading || !inputMessage.trim()}
+                  className="bg-indigo-600 hover:bg-indigo-500 text-white px-4 rounded-xl shadow-md shadow-indigo-600/20"
+                >
+                  <Send className="h-4 w-4" />
+                </Button>
+              </form>
+            </div>
+          )}
         </div>
 
         {/* Right Side: Rental Context & Security Inspector (5 cols on lg) */}
