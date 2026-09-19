@@ -117,6 +117,86 @@ User message: "${userMessage}"`;
 }
 
 /**
+ * Dynamically analyzes user message for MULTIPLE intents using Gemini.
+ * Returns an array of detected intents with entities and confirmation requirements.
+ */
+export async function dynamicAnalyzeMultiIntents(
+  userMessage: string,
+  customModel?: string
+): Promise<{
+  intents: Array<{
+    intent: IntentType;
+    confidence: number;
+    entities: Record<string, any>;
+    requiresConfirmation?: boolean;
+    confirmationPrompt?: string;
+  }>;
+  modelUsed?: string;
+} | null> {
+  const model = getGeminiModel(0.1, customModel);
+  if (!model) return null;
+
+  const modelUsed = getGeminiModelName(customModel);
+
+  try {
+    const prompt = `You are the multi-intent extraction engine for HavenDex, an AI-powered rental OS.
+A single user message can contain ONE OR MULTIPLE intents.
+Analyze the message and extract ALL distinct intents as a JSON array.
+
+Possible intent values:
+- "PAYMENT_STATUS": asking if rent is paid, checking payment status
+- "RENT_DUE": asking when rent is due, due date, invoice schedule
+- "PAYMENT_VALIDATION": validating/confirming a payment transaction
+- "MAINTENANCE_REPORT": reporting broken items, leaks, AC issues, repair needs
+- "MAINTENANCE_STATUS": inquiring about status of existing maintenance issues
+- "OWNER_NOTIFICATION": explicitly requesting to inform/notify/tell the property owner
+- "PROPERTY_INFORMATION": asking about property amenities, address, rules
+- "RENTAL_INFORMATION": asking about lease, room, tenancy contract
+- "GENERAL_RENTAL_ASSISTANCE": greetings or general inquiries
+
+For each intent, provide:
+- "intent": one of the above
+- "confidence": number between 0.0 and 1.0
+- "entities": object with extracted parameters (e.g., category, priority, title, description, transactionRef, message, urgent)
+- "requiresConfirmation": boolean (true ONLY for sensitive operations like executing financial transactions or lease termination)
+- "confirmationPrompt": if requiresConfirmation is true, clear prompt asking the user to confirm
+
+Example user message: "My rent is paid, confirm it and tell the owner my AC isn't working."
+Expected response:
+[
+  { "intent": "PAYMENT_VALIDATION", "confidence": 0.95, "entities": {} },
+  { "intent": "MAINTENANCE_REPORT", "confidence": 0.95, "entities": { "category": "APPLIANCE", "priority": "HIGH", "title": "AC not working", "description": "Tenant reports AC is not working" } },
+  { "intent": "OWNER_NOTIFICATION", "confidence": 0.9, "entities": { "message": "Tenant reported AC is not working", "urgent": true } }
+]
+
+Return ONLY a valid JSON array. No markdown code blocks.
+
+User message: "${userMessage}"`;
+
+    const res = await model.invoke([new HumanMessage(prompt)]);
+    const content = typeof res.content === 'string' ? res.content : JSON.stringify(res.content);
+    const cleaned = content.replace(/```json/g, '').replace(/```/g, '').trim();
+    const parsed = JSON.parse(cleaned);
+
+    if (Array.isArray(parsed) && parsed.length > 0) {
+      return {
+        intents: parsed.map((item) => ({
+          intent: item.intent as IntentType,
+          confidence: item.confidence || 0.9,
+          entities: item.entities || {},
+          requiresConfirmation: item.requiresConfirmation || false,
+          confirmationPrompt: item.confirmationPrompt,
+        })),
+        modelUsed,
+      };
+    }
+  } catch (err) {
+    console.warn(`Gemini (${modelUsed}) dynamic multi-intent parsing failed, falling back:`, err);
+  }
+  return null;
+}
+
+/**
  * Dynamically selects required tools from available registry using the configured Gemini model.
  */
 export async function dynamicPlanTools(
@@ -157,23 +237,27 @@ Return strictly JSON array without markdown formatting.`;
 
 /**
  * Dynamically synthesizes natural language response using the configured Gemini model grounded in tool execution results.
+ * Supports multilingual responses (Hindi, Indian English, etc.).
  */
 export async function dynamicSynthesizeResponse(
   userMessage: string,
   intent: string,
   toolResults: Record<string, any>,
   context: any,
-  customModel?: string
+  customModel?: string,
+  languageCode?: string
 ): Promise<string | null> {
   const model = getGeminiModel(0.3, customModel);
   if (!model) return null;
 
   const modelUsed = getGeminiModelName(customModel);
+  const targetLanguage = languageCode && languageCode.startsWith('hi') ? 'Hindi (हिन्दी)' : 'English (Indian context)';
 
   try {
     const prompt = `You are HavenDex, an AI rental assistant teammate.
 The user asked: "${userMessage}"
-Intent: "${intent}"
+Intent(s): "${intent}"
+Target Language: ${targetLanguage}
 
 Ground-truth domain service execution results:
 ${JSON.stringify(toolResults, null, 2)}
@@ -182,11 +266,11 @@ Rental Context:
 ${JSON.stringify(context, null, 2)}
 
 Instructions:
-1. Synthesize a warm, helpful, professional, concise response to the user.
-2. Rely strictly on the ground-truth data from the tool results.
-3. Do not invent any numbers, dates, or false facts.
-4. If a maintenance issue or task was created, confirm it clearly with title, priority, and technician info.
-5. If rent status was retrieved, state the amount and due date clearly.
+1. Synthesize a warm, helpful, professional, concise response to the user in ${targetLanguage}.
+2. If multiple actions were executed, clearly report each one (e.g. Payment status confirmed, Maintenance issue created, Owner notified).
+3. If an action failed, report its actual failure honestly (e.g. "Payment: Confirmed, Maintenance: Could not create task"). Never claim both succeeded if one failed!
+4. Rely strictly on the ground-truth data from the tool results.
+5. Do not invent any numbers, dates, or false facts.
 6. Keep the response concise (2-4 sentences max).
 
 Response:`;
@@ -199,3 +283,4 @@ Response:`;
   }
   return null;
 }
+
