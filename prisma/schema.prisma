@@ -51,6 +51,7 @@ enum NotificationType {
   PAYMENT_RECEIVED
   PAYMENT_FAILED
   MAINTENANCE_UPDATE
+  MAINTENANCE_RESOLVED
   LIFECYCLE_CHANGE
   SYSTEM
 }
@@ -234,6 +235,7 @@ model MaintenanceIssue {
   priority     String            @default("MEDIUM")  // LOW, MEDIUM, HIGH, EMERGENCY
   status       MaintenanceStatus @default(ISSUE_REPORTED)
   resolution   String?           // Repair details e.g. "AC service completed, filter replaced"
+  imageUrl     String?           // Base64 encoded photo evidence uploaded by tenant
   isRepeated   Boolean           @default(false)
   createdAt    DateTime          @default(now())
   updatedAt    DateTime          @updatedAt
