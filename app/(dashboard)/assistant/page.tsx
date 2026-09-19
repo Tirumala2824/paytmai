@@ -79,7 +79,7 @@ const THINKING_MESSAGES = [
   'Synthesizing response...',
 ];
 
-const QUICK_PROMPTS = [
+const TENANT_QUICK_PROMPTS = [
   {
     icon: CreditCard,
     title: 'Rent status',
@@ -110,15 +110,58 @@ const QUICK_PROMPTS = [
   },
 ];
 
+const OWNER_QUICK_PROMPTS = [
+  {
+    icon: CreditCard,
+    title: 'Revenue & Collections',
+    desc: 'Total rent collected vs pending across properties',
+    prompt: 'What is my total monthly revenue, rent collection, and pending amount?',
+    color: 'text-emerald-400',
+  },
+  {
+    icon: Home,
+    title: 'Occupancy & Vacancies',
+    desc: 'Vacant rooms and occupancy percentage breakdown',
+    prompt: 'Show me my current occupancy rate and list all vacant rooms.',
+    color: 'text-indigo-400',
+  },
+  {
+    icon: Zap,
+    title: 'Tenant Roster',
+    desc: 'Active tenants, assigned rooms, and payment status',
+    prompt: 'List all active tenants across my properties and their rent status.',
+    color: 'text-purple-400',
+  },
+  {
+    icon: Wrench,
+    title: 'Maintenance Triage',
+    desc: 'Cross-property open tickets and technician assignments',
+    prompt: 'Show all open maintenance issues across my properties.',
+    color: 'text-amber-400',
+  },
+];
+
 const FOLLOW_UPS: Record<string, string[]> = {
   payment: ['Download rent receipt', 'When is my next rent due?', 'Show payment history'],
   maintenance: ['Check repair progress', 'Report another issue', 'Tell the owner it is urgent'],
   lease: ['Who is my property manager?', 'Show security deposit status', 'What are house rules?'],
+  portfolio: ['Show vacant rooms', 'List all active tenants', 'What is my pending rent?'],
+  vacancy: ['Show revenue breakdown', 'List all active tenants', 'Show maintenance tickets'],
+  tenants: ['Check pending rent payments', 'Show vacant rooms', 'Show maintenance tickets'],
+  owner_maintenance: ['Dispatch technician', 'Show tenant roster', 'Show revenue summary'],
   default: ['Is my rent paid?', 'My AC is not working', 'Show my room details'],
 };
 
-function getFollowUps(intent?: string): string[] {
-  if (!intent) return FOLLOW_UPS.default;
+function getFollowUps(intent?: string, persona?: 'TENANT' | 'OWNER'): string[] {
+  if (!intent) {
+    return persona === 'OWNER'
+      ? ['What is my total monthly revenue?', 'Show vacant rooms', 'List all active tenants']
+      : FOLLOW_UPS.default;
+  }
+  if (intent === 'PORTFOLIO_OVERVIEW') return FOLLOW_UPS.portfolio;
+  if (intent === 'VACANCY_STATUS') return FOLLOW_UPS.vacancy;
+  if (intent === 'TENANT_LIST') return FOLLOW_UPS.tenants;
+  if (intent === 'OWNER_MAINTENANCE_OVERVIEW') return FOLLOW_UPS.owner_maintenance;
   if (intent.includes('PAYMENT') || intent.includes('RENT')) return FOLLOW_UPS.payment;
   if (intent.includes('MAINTENANCE') || intent.includes('ISSUE')) return FOLLOW_UPS.maintenance;
   if (intent.includes('LEASE') || intent.includes('TENANCY')) return FOLLOW_UPS.lease;
@@ -138,6 +181,9 @@ export default function AssistantPage() {
   const [showModelModal, setShowModelModal] = useState(false);
   const [copiedId, setCopiedId] = useState<string | null>(null);
 
+  // Persona State: Tenant vs Owner
+  const [activePersona, setActivePersona] = useState<'TENANT' | 'OWNER'>('TENANT');
+
   // Active Model State
   const [selectedLlm, setSelectedLlm] = useState<string>('gemini-3.8-flash');
   const [isDropdownOpen, setIsDropdownOpen] = useState(false);
@@ -150,6 +196,14 @@ export default function AssistantPage() {
   useEffect(() => {
     fetchContext();
   }, []);
+
+  const togglePersona = (persona: 'TENANT' | 'OWNER') => {
+    if (persona === activePersona) return;
+    setActivePersona(persona);
+    setMessages([]);
+    setActiveSessionId(undefined);
+    fetchContext(persona);
+  };
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -178,12 +232,17 @@ export default function AssistantPage() {
     }
   }, [inputMessage]);
 
-  async function fetchContext() {
+  async function fetchContext(roleOverride?: 'TENANT' | 'OWNER') {
     try {
-      const res = await fetch('/api/assistant/context');
+      const url = roleOverride ? `/api/assistant/context?role=${roleOverride}` : `/api/assistant/context`;
+      const res = await fetch(url);
       if (res.ok) {
         const data = await res.json();
         setRentalContext(data);
+        if (data.user?.role && !roleOverride) {
+          const detected = data.user.role === 'OWNER' || data.user.role === 'ADMIN' ? 'OWNER' : 'TENANT';
+          setActivePersona(detected);
+        }
       }
     } catch {
       // Non-blocking
@@ -272,6 +331,7 @@ export default function AssistantPage() {
           message: textToSend + visionAnalysisText,
           sessionId: activeSessionId,
           modelName: selectedLlm,
+          userRole: activePersona,
         }),
       });
 
@@ -295,11 +355,11 @@ export default function AssistantPage() {
         intent: data.intent,
         previousRelatedIssue: data.previousRelatedIssue,
         isRepeatedIssue: data.isRepeatedIssue,
-        followUps: getFollowUps(data.intent),
+        followUps: getFollowUps(data.intent, activePersona),
       };
 
       setMessages((prev) => [...prev, assistantMsg]);
-      fetchContext();
+      fetchContext(activePersona);
     } catch (error: any) {
       setMessages((prev) => [
         ...prev,
@@ -308,13 +368,15 @@ export default function AssistantPage() {
           sender: 'assistant',
           text: "I ran into a temporary issue connecting with the model. Please check your connection or try again.",
           timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-          followUps: ['Is my rent paid?', 'My AC is not working', 'Try again'],
+          followUps: activePersona === 'OWNER'
+            ? ['Show total revenue', 'Show vacant rooms', 'Try again']
+            : ['Is my rent paid?', 'My AC is not working', 'Try again'],
         },
       ]);
     } finally {
       setIsLoading(false);
     }
-  }, [inputMessage, selectedImage, isLoading, activeSessionId, selectedLlm]);
+  }, [inputMessage, selectedImage, isLoading, activeSessionId, selectedLlm, activePersona]);
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -335,65 +397,92 @@ export default function AssistantPage() {
   return (
     <div className="flex flex-col h-[calc(100vh-5.5rem)] max-w-4xl mx-auto px-2 sm:px-4">
       {/* Top ChatGPT Bar */}
-      <div className="flex items-center justify-between py-2 border-b border-slate-800/80 shrink-0">
-        {/* Model Selector Dropdown */}
-        <div className="relative">
-          <button
-            onClick={() => setIsDropdownOpen(!isDropdownOpen)}
-            className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-slate-900 border border-slate-800 hover:border-slate-700 text-sm font-semibold text-slate-200 transition-colors shadow-sm"
-          >
-            <div className="h-5 w-5 rounded-lg bg-gradient-to-tr from-indigo-500 to-violet-500 flex items-center justify-center">
-              <Sparkles className="h-3 w-3 text-white" />
-            </div>
-            <span>{activeModelMeta.label}</span>
-            <span className="text-[10px] px-1.5 py-0.5 rounded-md bg-indigo-500/20 text-indigo-300 font-normal">
-              {activeModelMeta.badge}
-            </span>
-            <ChevronDown className="h-3.5 w-3.5 text-slate-400" />
-          </button>
+      <div className="flex items-center justify-between py-2 border-b border-slate-800/80 shrink-0 gap-2">
+        {/* Left: Model Selector & Persona Switcher */}
+        <div className="flex items-center gap-2">
+          {/* Model Selector Dropdown */}
+          <div className="relative">
+            <button
+              onClick={() => setIsDropdownOpen(!isDropdownOpen)}
+              className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-slate-900 border border-slate-800 hover:border-slate-700 text-sm font-semibold text-slate-200 transition-colors shadow-sm"
+            >
+              <div className="h-5 w-5 rounded-lg bg-gradient-to-tr from-indigo-500 to-violet-500 flex items-center justify-center">
+                <Sparkles className="h-3 w-3 text-white" />
+              </div>
+              <span>{activeModelMeta.label}</span>
+              <span className="text-[10px] px-1.5 py-0.5 rounded-md bg-indigo-500/20 text-indigo-300 font-normal">
+                {activeModelMeta.badge}
+              </span>
+              <ChevronDown className="h-3.5 w-3.5 text-slate-400" />
+            </button>
 
-          {/* Dropdown Menu */}
-          {isDropdownOpen && (
-            <div className="absolute left-0 top-full mt-2 w-72 rounded-2xl bg-slate-900/95 border border-slate-800 shadow-2xl p-1.5 z-50 backdrop-blur-xl animate-in fade-in zoom-in-95 duration-100">
-              <div className="px-3 py-2 text-[11px] font-semibold tracking-wider uppercase text-slate-400 border-b border-slate-800/60 flex items-center justify-between">
-                <span>Select LLM Model</span>
-                <span className="text-slate-500 font-mono text-[10px]">Google Gemini</span>
-              </div>
-              <div className="p-1 space-y-1">
-                {SUPPORTED_LLM_MODELS.map((model) => (
-                  <button
-                    key={model.id}
-                    onClick={() => {
-                      setSelectedLlm(model.id);
-                      setIsDropdownOpen(false);
-                    }}
-                    className={`w-full flex items-start gap-2.5 p-2.5 rounded-xl text-left transition-all ${
-                      selectedLlm === model.id
-                        ? 'bg-indigo-600/20 text-indigo-200 border border-indigo-500/30'
-                        : 'hover:bg-slate-800/60 text-slate-300'
-                    }`}
-                  >
-                    {model.badge === 'Recommended' ? (
-                      <Zap className="h-4 w-4 text-amber-400 mt-0.5 shrink-0" />
-                    ) : model.badge === 'Best Quality' ? (
-                      <Star className="h-4 w-4 text-violet-400 mt-0.5 shrink-0" />
-                    ) : (
-                      <Sparkles className="h-4 w-4 text-slate-400 mt-0.5 shrink-0" />
-                    )}
-                    <div className="flex-1 min-w-0">
-                      <div className="flex items-center justify-between">
-                        <span className="text-xs font-semibold">{model.label}</span>
-                        <span className="text-[10px] px-1.5 py-0.2 rounded bg-slate-800 text-slate-400 font-mono">
-                          {model.badge}
-                        </span>
+            {/* Dropdown Menu */}
+            {isDropdownOpen && (
+              <div className="absolute left-0 top-full mt-2 w-72 rounded-2xl bg-slate-900/95 border border-slate-800 shadow-2xl p-1.5 z-50 backdrop-blur-xl animate-in fade-in zoom-in-95 duration-100">
+                <div className="px-3 py-2 text-[11px] font-semibold tracking-wider uppercase text-slate-400 border-b border-slate-800/60 flex items-center justify-between">
+                  <span>Select LLM Model</span>
+                  <span className="text-slate-500 font-mono text-[10px]">Google Gemini</span>
+                </div>
+                <div className="p-1 space-y-1">
+                  {SUPPORTED_LLM_MODELS.map((model) => (
+                    <button
+                      key={model.id}
+                      onClick={() => {
+                        setSelectedLlm(model.id);
+                        setIsDropdownOpen(false);
+                      }}
+                      className={`w-full flex items-start gap-2.5 p-2.5 rounded-xl text-left transition-all ${
+                        selectedLlm === model.id
+                          ? 'bg-indigo-600/20 text-indigo-200 border border-indigo-500/30'
+                          : 'hover:bg-slate-800/60 text-slate-300'
+                      }`}
+                    >
+                      {model.badge === 'Recommended' ? (
+                        <Zap className="h-4 w-4 text-amber-400 mt-0.5 shrink-0" />
+                      ) : model.badge === 'Best Quality' ? (
+                        <Star className="h-4 w-4 text-violet-400 mt-0.5 shrink-0" />
+                      ) : (
+                        <Sparkles className="h-4 w-4 text-slate-400 mt-0.5 shrink-0" />
+                      )}
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center justify-between">
+                          <span className="text-xs font-semibold">{model.label}</span>
+                          <span className="text-[10px] px-1.5 py-0.2 rounded bg-slate-800 text-slate-400 font-mono">
+                            {model.badge}
+                          </span>
+                        </div>
+                        <p className="text-[11px] text-slate-400 leading-snug mt-0.5">{model.description}</p>
                       </div>
-                      <p className="text-[11px] text-slate-400 leading-snug mt-0.5">{model.description}</p>
-                    </div>
-                  </button>
-                ))}
+                    </button>
+                  ))}
+                </div>
               </div>
-            </div>
-          )}
+            )}
+          </div>
+
+          {/* Persona Switcher (Tenant vs Owner) */}
+          <div className="flex items-center bg-slate-900 border border-slate-800 rounded-xl p-0.5 shadow-sm">
+            <button
+              onClick={() => togglePersona('TENANT')}
+              className={`flex items-center gap-1.5 px-3 py-1 rounded-lg text-xs font-medium transition-all ${
+                activePersona === 'TENANT'
+                  ? 'bg-indigo-600 text-white shadow-sm font-semibold'
+                  : 'text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              <span>👤 Tenant</span>
+            </button>
+            <button
+              onClick={() => togglePersona('OWNER')}
+              className={`flex items-center gap-1.5 px-3 py-1 rounded-lg text-xs font-medium transition-all ${
+                activePersona === 'OWNER'
+                  ? 'bg-amber-600 text-white shadow-sm font-semibold'
+                  : 'text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              <span>🏢 Owner</span>
+            </button>
+          </div>
         </div>
 
         {/* Right Actions */}
@@ -440,7 +529,7 @@ export default function AssistantPage() {
             activeSessionId={activeSessionId}
             onExecutionComplete={(res) => {
               if (res.sessionId) setActiveSessionId(res.sessionId);
-              fetchContext();
+              fetchContext(activePersona);
             }}
           />
         </div>
@@ -450,17 +539,59 @@ export default function AssistantPage() {
       <div className="flex-1 overflow-y-auto py-4 space-y-6 no-scrollbar">
         {messages.length === 0 && !showVoice ? (
           /* Clean ChatGPT Empty State */
-          <div className="h-full flex flex-col items-center justify-center text-center px-4 py-8">
-            <div className="h-14 w-14 rounded-2xl bg-gradient-to-tr from-indigo-600 via-indigo-500 to-violet-500 flex items-center justify-center shadow-xl shadow-indigo-600/20 mb-4">
+          <div className="h-full flex flex-col items-center justify-center text-center px-4 py-6">
+            <div
+              className={`h-14 w-14 rounded-2xl flex items-center justify-center shadow-xl mb-4 ${
+                activePersona === 'OWNER'
+                  ? 'bg-gradient-to-tr from-amber-600 via-amber-500 to-orange-500 shadow-amber-600/20'
+                  : 'bg-gradient-to-tr from-indigo-600 via-indigo-500 to-violet-500 shadow-indigo-600/20'
+              }`}
+            >
               <Sparkles className="h-7 w-7 text-white" />
             </div>
-            <h2 className="text-xl font-bold text-white mb-2">How can Haven help you today?</h2>
-            <p className="text-sm text-slate-400 max-w-md mb-8">
-              Ask about your rent payments, report room repairs with photos, or inspect lease agreements.
+            <h2 className="text-xl font-bold text-white mb-2">
+              {activePersona === 'OWNER'
+                ? 'HavenDex Manager (Owner Co-pilot)'
+                : 'How can Haven help you today?'}
+            </h2>
+            <p className="text-sm text-slate-400 max-w-md mb-6">
+              {activePersona === 'OWNER'
+                ? 'Executive AI copilot for property owners. Check revenue collections, room vacancies, tenant rosters, and cross-property maintenance.'
+                : 'Ask about your rent payments, report room repairs with photos, or inspect lease agreements.'}
             </p>
 
+            {/* Owner Live Portfolio KPI Bar (If Loaded) */}
+            {activePersona === 'OWNER' && rentalContext?.portfolio && (
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 w-full max-w-xl mb-6 text-left">
+                <div className="p-2.5 rounded-xl bg-slate-900/80 border border-slate-800">
+                  <span className="text-[11px] text-slate-400 block">Properties</span>
+                  <span className="text-sm font-bold text-white">
+                    {rentalContext.portfolio.totalProperties} Active
+                  </span>
+                </div>
+                <div className="p-2.5 rounded-xl bg-slate-900/80 border border-slate-800">
+                  <span className="text-[11px] text-slate-400 block">Occupancy</span>
+                  <span className="text-sm font-bold text-indigo-400">
+                    {rentalContext.portfolio.occupancyRate}% ({rentalContext.portfolio.occupiedRooms}/{rentalContext.portfolio.totalRooms})
+                  </span>
+                </div>
+                <div className="p-2.5 rounded-xl bg-slate-900/80 border border-slate-800">
+                  <span className="text-[11px] text-slate-400 block">Collected Rent</span>
+                  <span className="text-sm font-bold text-emerald-400">
+                    ₹{Number(rentalContext.portfolio.collectedRent || 0).toLocaleString('en-IN')}
+                  </span>
+                </div>
+                <div className="p-2.5 rounded-xl bg-slate-900/80 border border-slate-800">
+                  <span className="text-[11px] text-slate-400 block">Pending Rent</span>
+                  <span className="text-sm font-bold text-amber-400">
+                    ₹{Number(rentalContext.portfolio.pendingRent || 0).toLocaleString('en-IN')}
+                  </span>
+                </div>
+              </div>
+            )}
+
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 w-full max-w-xl text-left">
-              {QUICK_PROMPTS.map((item) => {
+              {(activePersona === 'OWNER' ? OWNER_QUICK_PROMPTS : TENANT_QUICK_PROMPTS).map((item) => {
                 const Icon = item.icon;
                 return (
                   <button

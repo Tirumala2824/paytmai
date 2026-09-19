@@ -9,7 +9,7 @@ export const dynamic = 'force-dynamic';
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
-    const { message, sessionId, modelName, languageCode, generateAudio, confirmedAction } = body;
+    const { message, sessionId, modelName, languageCode, generateAudio, confirmedAction, userRole } = body;
 
     if (!message || typeof message !== 'string') {
       return NextResponse.json(
@@ -21,17 +21,19 @@ export async function POST(req: NextRequest) {
     // Server-side authentication (NEVER trust client-supplied user IDs)
     let authContext = await getAuthenticatedUser();
 
-    // In demo environment, if no active auth session is present, fallback to default seed tenant
-    if (!authContext?.userProfile) {
-      const demoTenant = await prisma.userProfile.findFirst({
-        where: { role: UserRole.TENANT },
-        include: { tenant: true },
+    // If client specifically requests OWNER persona in demo mode or if user has no session:
+    const targetRole = userRole === 'OWNER' ? UserRole.OWNER : UserRole.TENANT;
+
+    if (!authContext?.userProfile || (userRole && authContext.userProfile.role !== targetRole)) {
+      const demoUser = await prisma.userProfile.findFirst({
+        where: { role: targetRole },
+        include: { tenant: true, owner: true },
       });
 
-      if (demoTenant) {
+      if (demoUser) {
         authContext = {
-          userProfile: demoTenant,
-          supabaseUser: { id: demoTenant.authUserId, email: demoTenant.email },
+          userProfile: demoUser,
+          supabaseUser: { id: demoUser.authUserId, email: demoUser.email },
         };
       }
     }

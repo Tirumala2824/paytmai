@@ -9,7 +9,11 @@ export type IntentType =
   | 'OWNER_NOTIFICATION'
   | 'PROPERTY_INFORMATION'
   | 'RENTAL_INFORMATION'
-  | 'GENERAL_RENTAL_ASSISTANCE';
+  | 'GENERAL_RENTAL_ASSISTANCE'
+  | 'PORTFOLIO_OVERVIEW'
+  | 'TENANT_LIST'
+  | 'VACANCY_STATUS'
+  | 'OWNER_MAINTENANCE_OVERVIEW';
 
 export interface ToolExecutionContext {
   userProfile: UserProfile;
@@ -135,5 +139,30 @@ export interface AgentRentalContext {
     isRepeated: boolean;
   };
   isRepeatedIssue?: boolean;
+  portfolio?: {
+    ownerName: string;
+    companyName?: string | null;
+    totalProperties: number;
+    properties: Array<{
+      id: string;
+      name: string;
+      address: string;
+      city: string;
+      totalRooms: number;
+      occupiedRooms: number;
+      vacantRooms: number;
+    }>;
+    totalRooms: number;
+    occupiedRooms: number;
+    vacantRooms: number;
+    occupancyRate: number;
+    totalMonthlyExpectedRent: number;
+    totalRentCollected: number;
+    totalRentPending: number;
+    activeTenantsCount: number;
+    openMaintenanceCount: number;
+    inProgressMaintenanceCount: number;
+    fixedMaintenanceCount: number;
+  };
 }
 

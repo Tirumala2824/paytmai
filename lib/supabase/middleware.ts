@@ -77,10 +77,19 @@ export async function updateSession(request: NextRequest) {
     return NextResponse.redirect(url);
   }
 
-  // If already authenticated and accessing login/signup, redirect to dashboard
+  // If already authenticated and accessing login/signup, redirect to their role-based dashboard
   if (isAuthenticated && isAuthRoute) {
+    let targetPath = '/tenant';
+    if (demoSessionCookie?.value) {
+      try {
+        const parsed = JSON.parse(demoSessionCookie.value);
+        if (parsed.role === 'OWNER' || parsed.role === 'ADMIN' || parsed.role === 'PROPERTY_MANAGER') {
+          targetPath = '/owner';
+        }
+      } catch {}
+    }
     const url = request.nextUrl.clone();
-    url.pathname = '/tenant';
+    url.pathname = targetPath;
     return NextResponse.redirect(url);
   }
 

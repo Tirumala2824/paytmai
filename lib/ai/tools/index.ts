@@ -1044,7 +1044,317 @@ export async function executeVerifyMaintenanceResolution(
 }
 
 // ============================================================================
-// Registry of All 14 Typed Tools
+// OWNER TOOLS: Portfolio Overview, Tenant Roster, Maintenance Cross-Triage
+// ============================================================================
+
+export const getOwnerPortfolioSchema = z.object({
+  propertyId: z.string().optional(),
+});
+
+export async function executeGetOwnerPortfolio(
+  input: z.infer<typeof getOwnerPortfolioSchema>,
+  context: ToolExecutionContext
+): Promise<ToolCallResult> {
+  const toolName = 'getOwnerPortfolio';
+  try {
+    const { userProfile } = context;
+
+    let owner = await prisma.owner.findUnique({
+      where: { userProfileId: userProfile.id },
+      include: {
+        properties: {
+          include: {
+            rooms: true,
+            tenancies: {
+              where: { isActive: true },
+              include: {
+                tenant: { include: { userProfile: true } },
+                rentSchedules: { orderBy: { dueDate: 'desc' }, take: 1 },
+              },
+            },
+            maintenanceIssues: true,
+          },
+        },
+      },
+    });
+
+    if (!owner) {
+      owner = await prisma.owner.findFirst({
+        include: {
+          properties: {
+            include: {
+              rooms: true,
+              tenancies: {
+                where: { isActive: true },
+                include: {
+                  tenant: { include: { userProfile: true } },
+                  rentSchedules: { orderBy: { dueDate: 'desc' }, take: 1 },
+                },
+              },
+              maintenanceIssues: true,
+            },
+          },
+        },
+      });
+    }
+
+    if (!owner) {
+      return { toolName, status: 'FAILED', input, output: {}, error: 'No owner profile found' };
+    }
+
+    const properties = owner.properties || [];
+    let totalRooms = 0;
+    let occupiedRooms = 0;
+    let totalMonthlyExpectedRent = 0;
+    let totalRentCollected = 0;
+    let totalRentPending = 0;
+    let totalOpenIssues = 0;
+
+    const propertySummaries = properties.map((p) => {
+      const roomCount = p.rooms.length || p.totalRooms;
+      const occupied = p.tenancies.length;
+      const vacant = Math.max(0, roomCount - occupied);
+
+      totalRooms += roomCount;
+      occupiedRooms += occupied;
+
+      let propExpected = 0;
+      let propCollected = 0;
+      let propPending = 0;
+
+      p.tenancies.forEach((t) => {
+        propExpected += t.monthlyRent;
+        const currentSched = t.rentSchedules[0];
+        if (currentSched?.status === 'SUCCESS') {
+          propCollected += currentSched.amount;
+        } else {
+          propPending += t.monthlyRent;
+        }
+      });
+
+      totalMonthlyExpectedRent += propExpected;
+      totalRentCollected += propCollected;
+      totalRentPending += propPending;
+
+      const openIssues = p.maintenanceIssues.filter(
+        (i) => i.status !== 'CLOSED' && i.status !== 'VERIFIED'
+      ).length;
+      totalOpenIssues += openIssues;
+
+      return {
+        id: p.id,
+        name: p.name,
+        address: `${p.address}, ${p.city}`,
+        totalRooms: roomCount,
+        occupiedRooms: occupied,
+        vacantRooms: vacant,
+        occupancyRate: roomCount > 0 ? Math.round((occupied / roomCount) * 100) : 0,
+        expectedRent: propExpected,
+        collectedRent: propCollected,
+        pendingRent: propPending,
+        openMaintenance: openIssues,
+      };
+    });
+
+    const vacantRooms = Math.max(0, totalRooms - occupiedRooms);
+    const occupancyRate = totalRooms > 0 ? Math.round((occupiedRooms / totalRooms) * 100) : 0;
+
+    const output = {
+      ownerName: userProfile.name,
+      companyName: owner.companyName,
+      totalProperties: properties.length,
+      totalRooms,
+      occupiedRooms,
+      vacantRooms,
+      occupancyRate,
+      totalMonthlyExpectedRent,
+      expectedMonthlyRent: totalMonthlyExpectedRent,
+      totalRentCollected,
+      collectedRent: totalRentCollected,
+      totalRentPending,
+      pendingRent: totalRentPending,
+      totalOpenMaintenance: totalOpenIssues,
+      activeMaintenanceCount: totalOpenIssues,
+      properties: propertySummaries,
+      propertiesSummary: propertySummaries,
+    };
+
+    await logAgentAction(context.sessionId, 'QUERY', toolName, input, output, 'EXECUTED');
+    return {
+      toolName,
+      status: 'SUCCESS',
+      input,
+      output,
+      summary: `Portfolio Summary: ${properties.length} properties, ${occupiedRooms}/${totalRooms} occupied (${occupancyRate}% occupancy). Monthly rent: ₹${totalRentCollected.toLocaleString('en-IN')} collected, ₹${totalRentPending.toLocaleString('en-IN')} pending. ${totalOpenIssues} active maintenance issues.`,
+    };
+  } catch (err: any) {
+    await logAgentAction(context.sessionId, 'QUERY', toolName, input, { error: err.message }, 'FAILED');
+    return { toolName, status: 'FAILED', input, output: {}, error: err.message };
+  }
+}
+
+export const getOwnerTenantsSchema = z.object({
+  propertyId: z.string().optional(),
+});
+
+export async function executeGetOwnerTenants(
+  input: z.infer<typeof getOwnerTenantsSchema>,
+  context: ToolExecutionContext
+): Promise<ToolCallResult> {
+  const toolName = 'getOwnerTenants';
+  try {
+    const { userProfile } = context;
+
+    let owner = await prisma.owner.findUnique({
+      where: { userProfileId: userProfile.id },
+      include: { properties: { select: { id: true } } },
+    });
+
+    if (!owner) {
+      owner = await prisma.owner.findFirst({
+        include: { properties: { select: { id: true } } },
+      });
+    }
+
+    if (!owner) {
+      return { toolName, status: 'FAILED', input, output: {}, error: 'No owner profile found' };
+    }
+
+    const propIds = input.propertyId
+      ? [input.propertyId]
+      : owner.properties.map((p) => p.id);
+
+    const tenancies = await prisma.tenancy.findMany({
+      where: {
+        propertyId: { in: propIds },
+        isActive: true,
+      },
+      include: {
+        tenant: { include: { userProfile: true } },
+        property: true,
+        room: true,
+        rentSchedules: { orderBy: { dueDate: 'desc' }, take: 1 },
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    const tenants = tenancies.map((t) => {
+      const schedule = t.rentSchedules[0];
+      const isPaid = schedule?.status === 'SUCCESS';
+      return {
+        tenancyId: t.id,
+        name: t.tenant.userProfile.name,
+        email: t.tenant.userProfile.email,
+        phone: t.tenant.userProfile.phone,
+        propertyName: t.property.name,
+        roomNumber: t.room?.roomNumber || 'N/A',
+        monthlyRent: t.monthlyRent,
+        billingMonth: schedule?.billingMonth || 'Current',
+        rentStatus: isPaid ? 'PAID' : (schedule?.status || 'PENDING'),
+        dueDate: schedule?.dueDate ? schedule.dueDate.toISOString().split('T')[0] : null,
+      };
+    });
+
+    const output = {
+      count: tenants.length,
+      tenants,
+    };
+
+    await logAgentAction(context.sessionId, 'QUERY', toolName, input, output, 'EXECUTED');
+    return {
+      toolName,
+      status: 'SUCCESS',
+      input,
+      output,
+      summary: `Found ${tenants.length} active tenants across properties.`,
+    };
+  } catch (err: any) {
+    await logAgentAction(context.sessionId, 'QUERY', toolName, input, { error: err.message }, 'FAILED');
+    return { toolName, status: 'FAILED', input, output: {}, error: err.message };
+  }
+}
+
+export const getOwnerMaintenanceOverviewSchema = z.object({
+  status: z.string().optional(),
+});
+
+export async function executeGetOwnerMaintenanceOverview(
+  input: z.infer<typeof getOwnerMaintenanceOverviewSchema>,
+  context: ToolExecutionContext
+): Promise<ToolCallResult> {
+  const toolName = 'getOwnerMaintenanceOverview';
+  try {
+    const { userProfile } = context;
+
+    let owner = await prisma.owner.findUnique({
+      where: { userProfileId: userProfile.id },
+      include: { properties: { select: { id: true } } },
+    });
+
+    if (!owner) {
+      owner = await prisma.owner.findFirst({
+        include: { properties: { select: { id: true } } },
+      });
+    }
+
+    if (!owner) {
+      return { toolName, status: 'FAILED', input, output: {}, error: 'No owner profile found' };
+    }
+
+    const propIds = owner.properties.map((p) => p.id);
+
+    const issues = await prisma.maintenanceIssue.findMany({
+      where: {
+        propertyId: { in: propIds },
+      },
+      include: {
+        property: true,
+        reportedBy: { include: { userProfile: true } },
+        tasks: { orderBy: { createdAt: 'desc' }, take: 1 },
+      },
+      orderBy: { createdAt: 'desc' },
+      take: 20,
+    });
+
+    const issueList = issues.map((i) => ({
+      id: i.id,
+      title: i.title,
+      property: i.property.name,
+      reportedBy: i.reportedBy.userProfile.name,
+      category: i.category,
+      priority: i.priority,
+      status: i.status,
+      resolution: i.resolution,
+      assignedTechnician: i.tasks[0]?.assignedTo || 'Unassigned',
+      createdAt: i.createdAt.toISOString().split('T')[0],
+    }));
+
+    const openCount = issueList.filter((i) => !['CLOSED', 'VERIFIED'].includes(i.status)).length;
+    const resolvedCount = issueList.filter((i) => ['CLOSED', 'VERIFIED'].includes(i.status)).length;
+
+    const output = {
+      total: issueList.length,
+      openCount,
+      resolvedCount,
+      issues: issueList,
+    };
+
+    await logAgentAction(context.sessionId, 'QUERY', toolName, input, output, 'EXECUTED');
+    return {
+      toolName,
+      status: 'SUCCESS',
+      input,
+      output,
+      summary: `Maintenance Overview: ${openCount} active tickets, ${resolvedCount} resolved tickets across properties.`,
+    };
+  } catch (err: any) {
+    await logAgentAction(context.sessionId, 'QUERY', toolName, input, { error: err.message }, 'FAILED');
+    return { toolName, status: 'FAILED', input, output: {}, error: err.message };
+  }
+}
+
+// ============================================================================
+// Registry of All Typed Tools
 // ============================================================================
 export const AI_TOOLS_REGISTRY = {
   getTenantProfile: {
@@ -1117,4 +1427,21 @@ export const AI_TOOLS_REGISTRY = {
     execute: executeVerifyMaintenanceResolution,
     description: 'Verify resolution of a maintenance issue and transition rental lifecycle to VERIFIED',
   },
+  // Owner Portfolio Tools
+  getOwnerPortfolio: {
+    schema: getOwnerPortfolioSchema,
+    execute: executeGetOwnerPortfolio,
+    description: 'Retrieve portfolio-level property stats, occupancy rates, vacant rooms, and rent collection totals for owner',
+  },
+  getOwnerTenants: {
+    schema: getOwnerTenantsSchema,
+    execute: executeGetOwnerTenants,
+    description: 'Retrieve all active tenants across all properties owned by the owner with rent payment status',
+  },
+  getOwnerMaintenanceOverview: {
+    schema: getOwnerMaintenanceOverviewSchema,
+    execute: executeGetOwnerMaintenanceOverview,
+    description: 'Retrieve cross-property maintenance tickets and resolution status for owner',
+  },
 };
+
