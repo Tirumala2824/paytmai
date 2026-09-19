@@ -75,6 +75,15 @@ export interface AIExecutionResponse {
   languageCode?: string;
   audioBase64?: string;
   pendingConfirmation?: PendingConfirmation;
+  previousRelatedIssue?: {
+    id: string;
+    title: string;
+    status: string;
+    resolution?: string | null;
+    verifiedAt?: string;
+    isRepeated: boolean;
+  };
+  isRepeatedIssue?: boolean;
 }
 
 export interface AgentRentalContext {
@@ -111,5 +120,20 @@ export interface AgentRentalContext {
     status: string;
     createdAt: string;
   }>;
+  relevantMemories?: Array<{
+    id: string;
+    summary: string;
+    memoryType: string;
+    score?: number;
+  }>;
+  previousRelatedIssue?: {
+    id: string;
+    title: string;
+    status: string;
+    resolution?: string | null;
+    verifiedAt?: string;
+    isRepeated: boolean;
+  };
+  isRepeatedIssue?: boolean;
 }
 

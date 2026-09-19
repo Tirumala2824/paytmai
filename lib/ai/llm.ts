@@ -54,6 +54,7 @@ export function getGeminiModel(
     model: modelName,
     apiKey,
     temperature,
+    maxRetries: 0,
   });
 }
 

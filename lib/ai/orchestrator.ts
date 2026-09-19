@@ -139,5 +139,7 @@ export async function executeRentalAssistant(
     languageCode: finalState.detectedLanguage || languageCode,
     audioBase64,
     pendingConfirmation: finalState.pendingConfirmation,
+    previousRelatedIssue: finalState.context?.previousRelatedIssue,
+    isRepeatedIssue: finalState.context?.isRepeatedIssue,
   };
 }

@@ -163,11 +163,86 @@ bun test
 
 | Test Suite | Coverage | Status |
 | :--- | :--- | :--- |
+| `phase4-memory-maintenance.test.ts` | MemoryService, Context Retrieval, 9-stage lifecycle, multi-source verification, AI memory recall | 100% PASS |
 | `phase3-voice-multi-intent.test.ts` | Canonical scenario, parallel execution, partial failure, confirmation, Hindi, Sarvam | 100% PASS |
 | `ai-orchestrator.test.ts` | 5 canonical rental queries, state transitions, audit logging | 100% PASS |
 | `ai-tools.test.ts` | All 14 typed tools registry, execution, Zod validation | 100% PASS |
 | `lifecycle.test.ts` | Rental state machine valid/invalid transitions | 100% PASS |
 | `abac.test.ts` | Attribute-based access control & tenant/owner resource isolation | 100% PASS |
 | `rbac.test.ts` | Role-based permissions across TENANT, OWNER, ADMIN | 100% PASS |
+
+---
+
+## 🧠 Phase 4: Persistent Rental Context & Closed-Loop Maintenance Resolution
+
+HavenDex Phase 4 introduces **persistent rental memory** powered by a **Cognee MemoryService abstraction** and a **9-stage closed-loop maintenance state machine** with **multi-source verification**.
+
+### 🏛️ MemoryService Abstraction
+
+The `MemoryService` (`lib/ai/memory/service.ts`) decouples HavenDex from proprietary memory providers while providing dual-layer persistence:
+
+```
+                  ┌─────────────────────────────────────────┐
+                  │              HavenDex AI                │
+                  │   (LangGraph / Orchestrator / Tools)    │
+                  └───────────────────┬─────────────────────┘
+                                      │
+                         MemoryService Abstraction
+                                      │
+              ┌───────────────────────┴───────────────────────┐
+              ▼                                               ▼
+   Cognee Knowledge Graph                         PostgreSQL RentalMemory
+ (api.cognee.ai / vector)                      (Prisma ORM / Supabase DB)
+ - Semantic Search                              - Relational context & keys
+ - Fast 1500ms timeout fallback                 - Redacts passwords/secrets
+ - Dataset isolation per tenancy                - Audit trail integration
+```
+
+#### Core Memory Methods:
+1. `remember(params)`: Stores tenancy relationships, room context, previous maintenance issues/resolutions, and interaction summaries with automated sensitive data redaction (`[REDACTED_SENSITIVE]`).
+2. `retrieve(params)`: Queries historical memories by tenancy, user, or memory type.
+3. `search(params)`: Performs semantic & keyword-scored search over rental memories.
+4. `summarize(params)`: Synthesizes a natural language profile of the rental relationship for prompt context.
+5. `retrieveRelevantContext(params)`: Flow: **User Request → Authenticated User → Rental Identity → Relevant Context Retrieval → AI → Tool Execution**. Detects recurring issues (e.g. "The AC is broken again").
+
+### 🔄 9-Stage Closed-Loop Maintenance State Machine
+
+```
+ISSUE_REPORTED ──► CLASSIFIED ──► OWNER_NOTIFIED ──► TASK_ASSIGNED ──► IN_PROGRESS
+                                                                            │
+      CLOSED ◄─────────────── VERIFIED ◄─────────────── FIXED ◄─────────────┘
+                                  ▲                        ▲
+                                  │                        │
+                         (Satisfactory)             (Persisting)
+                                  │                        │
+                        [VERIFICATION_PENDING] ────────────┘
+```
+
+#### Strict Enforcement Rules:
+- **Never Close on Notification**: Notifying an owner advances the state to `OWNER_NOTIFIED` and notifies the dashboard, but **never closes the issue**.
+- **Multi-Source Verification**: Supports `TENANT_CONFIRMATION`, `OWNER_CONFIRMATION`, `AI_IMAGE_ANALYSIS`, and `COMBINED`.
+- **Honest AI Verification**: Pure human confirmations must **never** claim physical AI verification confidence (`confidence: null`). Confidence scores (e.g. 0.98) are only recorded when automated AI/sensor evidence is present.
+- **Audit Logging**: Every state transition generates an immutable `AuditEvent` with actor, timestamps, and before/after statuses.
+
+### 🧪 Canonical AI Memory Demonstration
+
+1. **Step 1: Historical Repair**: Tenant Arjun reports `"My AC isn't working."` → Technician repairs coil and tests 18°C airflow → Resolution verified.
+2. **Step 2: Recurring Issue**: Later, Arjun reports `"The AC is broken again."`
+3. **Step 3: Context Recall & Escalation**:
+   - AI retrieves previous verified AC repair memory.
+   - Prepend notice: `Previous related maintenance issue found.`
+   - Autonomously flags `isRepeated: true` and escalates priority to `HIGH`.
+   - Dispatches emergency task to technician and alerts owner.
+
+### 📊 Owner Maintenance Workspace (7 Filtered Views)
+
+1. **Open Issues**: All non-closed issues requiring owner oversight.
+2. **Urgent Issues**: High-priority and emergency issues.
+3. **Assigned Tasks**: Issues actively assigned to technicians.
+4. **In Progress**: Tasks actively being worked on by contractors.
+5. **Verification Pending**: Fixed issues awaiting tenant/owner/AI verification.
+6. **Resolved**: Successfully verified and closed issues with complete resolution history.
+7. **Repeated Issues**: Escalated issues where identical components failed previously.
+
 
 

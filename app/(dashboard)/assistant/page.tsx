@@ -36,6 +36,15 @@ interface ChatMessage {
   plannedActions?: string[];
   results?: Record<string, any>;
   intent?: string;
+  previousRelatedIssue?: {
+    id: string;
+    title: string;
+    status: string;
+    resolution?: string | null;
+    verifiedAt?: string;
+    isRepeated: boolean;
+  };
+  isRepeatedIssue?: boolean;
 }
 
 export default function AssistantPage() {
@@ -50,6 +59,7 @@ export default function AssistantPage() {
   ]);
   const [inputMessage, setInputMessage] = useState('');
   const [isLoading, setIsLoading] = useState(false);
+  const [isVerifyingDemo, setIsVerifyingDemo] = useState(false);
   const [activeSessionId, setActiveSessionId] = useState<string | undefined>(undefined);
   const [selectedModel, setSelectedModel] = useState<string>('gemini-1.5-flash');
   const [rentalContext, setRentalContext] = useState<any>(null);
@@ -60,7 +70,7 @@ export default function AssistantPage() {
     'Is my rent paid?',
     'My rent is due when?',
     "My AC isn't working.",
-    'Show my maintenance issues.',
+    'The AC is broken again.',
     'Tell the owner my AC is broken.',
   ];
 
@@ -86,6 +96,32 @@ export default function AssistantPage() {
       }
     } catch (err) {
       console.warn('Failed to load rental context:', err);
+    }
+  }
+
+  async function handleSimulateVerify() {
+    setIsVerifyingDemo(true);
+    try {
+      const res = await fetch('/api/maintenance/demo-step', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ step: 'STEP_2_FIX_AND_VERIFY' }),
+      });
+
+      if (res.ok) {
+        const verifyMsg: ChatMessage = {
+          id: `verify-${Date.now()}`,
+          sender: 'assistant',
+          text: `✅ **Repair Completed & Verified**\n\nIssue: "AC not cooling"\nStatus: CLOSED (Verified)\nResolution: AC service completed: filter cleaned, gas pressure recharged, cooling tested at 18°C\nMethod: COMBINED (Tenant Confirmation + AI Image Analysis, 98% confidence)\n\n*Saved to Cognee persistent rental memory graph.*`,
+          timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        };
+        setMessages((prev) => [...prev, verifyMsg]);
+        fetchContext();
+      }
+    } catch (err) {
+      console.error('Error simulating verify:', err);
+    } finally {
+      setIsVerifyingDemo(false);
     }
   }
 
@@ -140,6 +176,8 @@ export default function AssistantPage() {
         plannedActions: data.plannedActions,
         results: data.results,
         intent: data.intent,
+        previousRelatedIssue: data.previousRelatedIssue,
+        isRepeatedIssue: data.isRepeatedIssue,
       };
 
       setMessages((prev) => [...prev, assistantMsg]);
@@ -262,6 +300,76 @@ export default function AssistantPage() {
         </div>
       </div>
 
+      {/* Phase 4 AI Memory Demonstration Stepper Toolbar */}
+      <div className="rounded-2xl bg-gradient-to-r from-slate-900 via-indigo-950/40 to-slate-900 border border-indigo-500/30 p-4 space-y-3 shadow-xl backdrop-blur-xl">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <Badge className="bg-indigo-600/30 text-indigo-300 border-indigo-500/40 text-[10px] font-bold uppercase tracking-wider">
+              Phase 4 Demonstration
+            </Badge>
+            <h3 className="text-xs sm:text-sm font-bold text-white tracking-tight">
+              Persistent Rental Context &amp; Closed-Loop Maintenance Recall
+            </h3>
+          </div>
+          <span className="text-[11px] text-indigo-300 font-mono">
+            Autonomous Memory + Verification Flow
+          </span>
+        </div>
+
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+          <button
+            onClick={() => handleSendMessage("My AC isn't working.")}
+            disabled={isLoading}
+            className="p-3 rounded-xl bg-slate-950/80 hover:bg-indigo-900/30 border border-slate-800 hover:border-indigo-500/40 text-left transition-all group cursor-pointer disabled:opacity-50 flex flex-col justify-between"
+          >
+            <div className="flex items-center justify-between w-full mb-1">
+              <span className="text-xs font-bold text-indigo-300 flex items-center gap-1.5">
+                <span className="h-4 w-4 rounded-full bg-indigo-500/20 text-indigo-300 flex items-center justify-center text-[10px]">1</span>
+                Report Initial Issue
+              </span>
+              <ArrowRight className="h-3.5 w-3.5 text-slate-500 group-hover:text-indigo-400 group-hover:translate-x-0.5 transition-all" />
+            </div>
+            <p className="text-[11px] text-slate-400">
+              &quot;My AC isn&apos;t working.&quot; → Logs issue &amp; dispatches contractor
+            </p>
+          </button>
+
+          <button
+            onClick={handleSimulateVerify}
+            disabled={isLoading || isVerifyingDemo}
+            className="p-3 rounded-xl bg-slate-950/80 hover:bg-emerald-900/30 border border-slate-800 hover:border-emerald-500/40 text-left transition-all group cursor-pointer disabled:opacity-50 flex flex-col justify-between"
+          >
+            <div className="flex items-center justify-between w-full mb-1">
+              <span className="text-xs font-bold text-emerald-300 flex items-center gap-1.5">
+                <span className="h-4 w-4 rounded-full bg-emerald-500/20 text-emerald-300 flex items-center justify-center text-[10px]">2</span>
+                Complete &amp; Verify Repair
+              </span>
+              <CheckCircle2 className="h-3.5 w-3.5 text-slate-500 group-hover:text-emerald-400 transition-all" />
+            </div>
+            <p className="text-[11px] text-slate-400">
+              {isVerifyingDemo ? 'Simulating verification...' : 'Combined verification → Closed & stored in Cognee'}
+            </p>
+          </button>
+
+          <button
+            onClick={() => handleSendMessage("The AC is broken again.")}
+            disabled={isLoading}
+            className="p-3 rounded-xl bg-slate-950/80 hover:bg-amber-900/30 border border-slate-800 hover:border-amber-500/40 text-left transition-all group cursor-pointer disabled:opacity-50 flex flex-col justify-between"
+          >
+            <div className="flex items-center justify-between w-full mb-1">
+              <span className="text-xs font-bold text-amber-300 flex items-center gap-1.5">
+                <span className="h-4 w-4 rounded-full bg-amber-500/20 text-amber-300 flex items-center justify-center text-[10px]">3</span>
+                Test AI Memory Recall
+              </span>
+              <Sparkles className="h-3.5 w-3.5 text-slate-500 group-hover:text-amber-400 transition-all" />
+            </div>
+            <p className="text-[11px] text-slate-400">
+              &quot;The AC is broken again.&quot; → Recalls verified prior repair
+            </p>
+          </button>
+        </div>
+      </div>
+
       {/* Main Grid: Chat on Left, Context & Inspector on Right */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
         {/* Left Column: Voice Assistant OR Chat Feed (7 cols on lg) */}
@@ -352,6 +460,26 @@ export default function AssistantPage() {
                             : 'bg-slate-900 border border-slate-800 text-slate-200 rounded-tl-none shadow-sm'
                         }`}
                       >
+                        {msg.sender === 'assistant' &&
+                          (msg.previousRelatedIssue ||
+                            msg.text.includes('Previous related maintenance issue found')) && (
+                            <div className="mb-3 p-3 rounded-xl bg-amber-500/15 border border-amber-500/35 text-amber-200 text-xs flex items-start gap-2.5 shadow-sm">
+                              <div className="p-1.5 rounded-lg bg-amber-500/20 text-amber-300 shrink-0 mt-0.5">
+                                <Sparkles className="h-4 w-4 text-amber-400" />
+                              </div>
+                              <div>
+                                <span className="font-bold text-amber-300 block text-xs">
+                                  Previous related maintenance issue found
+                                </span>
+                                <p className="text-[11px] text-amber-200/90 mt-0.5 leading-relaxed">
+                                  {msg.previousRelatedIssue
+                                    ? `"${msg.previousRelatedIssue.title}" (${msg.previousRelatedIssue.status}) • Resolution: ${msg.previousRelatedIssue.resolution || 'Service completed'}`
+                                    : 'Retrieved verified historical AC repair context from Cognee memory graph.'}
+                                </p>
+                              </div>
+                            </div>
+                          )}
+
                         <div className="whitespace-pre-line">{msg.text}</div>
                         <div
                           className={`text-[10px] mt-2 font-mono ${
