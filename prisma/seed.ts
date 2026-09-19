@@ -4,6 +4,7 @@ import {
   RentalLifecycle,
   MaintenanceStatus,
   PaymentStatus,
+  VerificationMethod,
 } from '@prisma/client';
 
 const prisma = new PrismaClient();
@@ -12,6 +13,8 @@ async function main() {
   console.log('🌱 Starting HavenDex realistic seed...');
 
   // Clean existing records in reverse dependency order
+  await prisma.rentalMemory.deleteMany();
+  await prisma.maintenanceVerification.deleteMany();
   await prisma.auditEvent.deleteMany();
   await prisma.notification.deleteMany();
   await prisma.agentAction.deleteMany();
@@ -412,8 +415,48 @@ async function main() {
   console.log('Created Rent Schedules and Payments.');
 
   // ==========================================
-  // 6. MAINTENANCE ISSUES & TASKS
+  // 6. MAINTENANCE ISSUES, TASKS & VERIFICATIONS
   // ==========================================
+  // Issue 0: Historical AC issue for Arjun Mehta (Tenancy 1, Room 101) - VERIFIED & RESOLVED
+  const issue0 = await prisma.maintenanceIssue.create({
+    data: {
+      tenancyId: tenancy1.id,
+      propertyId: property1.id,
+      reportedById: tenantProfile1.tenant!.id,
+      title: 'AC not cooling',
+      description: 'The Daikin 1.5T split AC in Room 101 stopped cooling; fan is running but blowing ambient room temperature air.',
+      category: 'APPLIANCE',
+      priority: 'HIGH',
+      status: MaintenanceStatus.VERIFIED,
+      resolution: 'AC service completed: filter cleaned, gas pressure restored, cooling tested at 18°C',
+      isRepeated: false,
+    },
+  });
+
+  const task0 = await prisma.maintenanceTask.create({
+    data: {
+      issueId: issue0.id,
+      title: 'AC Compressor & Gas Pressure Service',
+      description: 'Clean condenser coils, flush drain line, top up R32 refrigerant, check thermostat.',
+      assignedTo: 'CoolCare Services (Technician Ramesh: +91 98450 11223)',
+      estimatedCost: 1800,
+      actualCost: 1500,
+      status: MaintenanceStatus.VERIFIED,
+      completedAt: new Date('2026-09-02'),
+    },
+  });
+
+  await prisma.maintenanceVerification.create({
+    data: {
+      issueId: issue0.id,
+      verificationMethod: VerificationMethod.COMBINED,
+      verifiedBy: tenantProfile1.id,
+      evidence: 'Tenant confirmed cooling restored to 18°C; Technician invoice #CC-9182 attached with digital sensor log.',
+      confidence: 0.98,
+      notes: 'Verified by tenant confirmation and digital temperature sensor readout.',
+    },
+  });
+
   // Issue 1: Sneha in Tenancy 2 reported AC cooling issue (Status: IN_PROGRESS)
   const issue1 = await prisma.maintenanceIssue.create({
     data: {
@@ -450,6 +493,7 @@ async function main() {
       category: 'PLUMBING',
       priority: 'MEDIUM',
       status: MaintenanceStatus.VERIFIED,
+      resolution: 'Replaced ceramic disc cartridge and rubber washer in mixer faucet',
     },
   });
 
@@ -466,7 +510,85 @@ async function main() {
     },
   });
 
-  console.log('Created Maintenance Issues and Tasks.');
+  await prisma.maintenanceVerification.create({
+    data: {
+      issueId: issue2.id,
+      verificationMethod: VerificationMethod.TENANT_CONFIRMATION,
+      verifiedBy: tenantProfile3.id,
+      evidence: 'Tenant confirmed dripping completely stopped and pressure normal.',
+      confidence: null,
+      notes: 'Tenant verified via mobile app check-off.',
+    },
+  });
+
+  console.log('Created Maintenance Issues, Tasks & Verifications.');
+
+  // ==========================================
+  // 6b. RENTAL MEMORY GRAPH (Cognee / Persistent)
+  // ==========================================
+  await prisma.rentalMemory.createMany({
+    data: [
+      {
+        userProfileId: tenantProfile1.id,
+        tenancyId: tenancy1.id,
+        propertyId: property1.id,
+        memoryType: 'TENANCY_RELATION',
+        key: 'LEASE_RELATION',
+        summary: 'Tenant Arjun Mehta is in active lease at Nexus Heights Luxury PG (Room 101) since 2026-06-01. Monthly rent ₹18,000.',
+        content: { rentAmount: 18000, leaseStart: '2026-06-01', propertyName: 'Nexus Heights Luxury PG' },
+        source: 'LOCAL_GRAPH',
+      },
+      {
+        userProfileId: tenantProfile1.id,
+        tenancyId: tenancy1.id,
+        propertyId: property1.id,
+        memoryType: 'ROOM',
+        key: 'ROOM_SPEC',
+        summary: 'Room 101 on Floor 1. SINGLE room type. Deposit ₹36,000. Amenities: High-speed WiFi, Power Backup, Gym.',
+        content: { roomNumber: '101', floor: 1, type: 'SINGLE' },
+        source: 'LOCAL_GRAPH',
+      },
+      {
+        userProfileId: tenantProfile1.id,
+        tenancyId: tenancy1.id,
+        propertyId: property1.id,
+        memoryType: 'MAINTENANCE_RESOLUTION',
+        key: 'AC_UNIT',
+        summary: 'Previous Maintenance: "AC not cooling" in Room 101 was repaired by CoolCare Services. Status: VERIFIED. Repair: AC service completed, filter cleaned, gas pressure restored.',
+        content: {
+          issueTitle: 'AC not cooling',
+          status: 'VERIFIED',
+          repair: 'AC service completed',
+          technician: 'CoolCare Services (Technician Ramesh)',
+          verifiedAt: '2026-09-02',
+          resolution: 'AC service completed: filter cleaned, gas pressure restored, cooling tested at 18°C',
+        },
+        source: 'COGNEE_API',
+      },
+      {
+        userProfileId: tenantProfile1.id,
+        tenancyId: tenancy1.id,
+        propertyId: property1.id,
+        memoryType: 'PAYMENT_CONTEXT',
+        key: 'RENT_PAYMENT_SCHEDULE',
+        summary: 'Rent due on the 5th of each month. Billing cycle 2026-09 is PENDING (₹18,000). Previous payment for August was SUCCESS via Paytm.',
+        content: { billingMonth: '2026-09', amount: 18000, status: 'PENDING' },
+        source: 'LOCAL_GRAPH',
+      },
+      {
+        userProfileId: tenantProfile2.id,
+        tenancyId: tenancy2.id,
+        propertyId: property2.id,
+        memoryType: 'TENANCY_RELATION',
+        key: 'LEASE_RELATION',
+        summary: 'Tenant Sneha Rao is residing at Nexus Studio Suites Indiranagar (Room 301). Monthly rent ₹26,000.',
+        content: { rentAmount: 26000, propertyName: 'Nexus Studio Suites Indiranagar' },
+        source: 'LOCAL_GRAPH',
+      },
+    ],
+  });
+
+  console.log('Created Persistent Rental Memory Graph records.');
 
   // ==========================================
   // 7. NOTIFICATIONS

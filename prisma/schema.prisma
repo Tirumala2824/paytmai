@@ -55,6 +55,13 @@ enum NotificationType {
   SYSTEM
 }
 
+enum VerificationMethod {
+  TENANT_CONFIRMATION
+  OWNER_CONFIRMATION
+  AI_IMAGE_ANALYSIS
+  COMBINED
+}
+
 model UserProfile {
   id          String         @id @default(uuid())
   authUserId  String         @unique // Supabase auth.users ID
@@ -226,18 +233,22 @@ model MaintenanceIssue {
   category     String            @default("GENERAL") // PLUMBING, ELECTRICAL, APPLIANCE, CLEANING, GENERAL
   priority     String            @default("MEDIUM")  // LOW, MEDIUM, HIGH, EMERGENCY
   status       MaintenanceStatus @default(ISSUE_REPORTED)
+  resolution   String?           // Repair details e.g. "AC service completed, filter replaced"
+  isRepeated   Boolean           @default(false)
   createdAt    DateTime          @default(now())
   updatedAt    DateTime          @updatedAt
 
-  tenancy    Tenancy           @relation(fields: [tenancyId], references: [id], onDelete: Cascade)
-  property   Property          @relation(fields: [propertyId], references: [id], onDelete: Cascade)
-  reportedBy Tenant            @relation(fields: [reportedById], references: [id], onDelete: Cascade)
-  tasks      MaintenanceTask[]
+  tenancy       Tenancy                   @relation(fields: [tenancyId], references: [id], onDelete: Cascade)
+  property      Property                  @relation(fields: [propertyId], references: [id], onDelete: Cascade)
+  reportedBy    Tenant                    @relation(fields: [reportedById], references: [id], onDelete: Cascade)
+  tasks         MaintenanceTask[]
+  verifications MaintenanceVerification[]
 
   @@index([tenancyId])
   @@index([propertyId])
   @@index([reportedById])
   @@index([status])
+  @@index([isRepeated])
 }
 
 model MaintenanceTask {
@@ -257,6 +268,44 @@ model MaintenanceTask {
 
   @@index([issueId])
   @@index([status])
+}
+
+model MaintenanceVerification {
+  id                 String             @id @default(uuid())
+  issueId            String
+  verificationMethod VerificationMethod
+  verifiedBy         String             // UserProfile ID or "AI_AGENT"
+  verifiedAt         DateTime           @default(now())
+  evidence           String?            // text description, photo URL, sensor reading, or confirmation statement
+  confidence         Float?             // e.g. 0.95 for AI_IMAGE_ANALYSIS or COMBINED
+  notes              String?
+  createdAt          DateTime           @default(now())
+
+  issue              MaintenanceIssue   @relation(fields: [issueId], references: [id], onDelete: Cascade)
+
+  @@index([issueId])
+  @@index([verificationMethod])
+}
+
+model RentalMemory {
+  id            String   @id @default(uuid())
+  userProfileId String
+  tenancyId     String?
+  propertyId    String?
+  memoryType    String   // TENANCY_RELATION, ROOM, MAINTENANCE_ISSUE, MAINTENANCE_RESOLUTION, PAYMENT_CONTEXT, RENTAL_EVENT, AGENT_ACTION, INTERACTION_SUMMARY
+  key           String?  // e.g. "AC_UNIT", "RENT_PAYMENT_SCHEDULE"
+  summary       String
+  content       Json?
+  confidence    Float?   @default(1.0)
+  source        String   @default("LOCAL_GRAPH") // COGNEE_API, LOCAL_GRAPH, AGENT_INFERENCE
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@index([userProfileId])
+  @@index([tenancyId])
+  @@index([propertyId])
+  @@index([memoryType])
+  @@index([key])
 }
 
 model Notification {

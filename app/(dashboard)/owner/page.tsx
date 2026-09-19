@@ -36,19 +36,23 @@ interface TenancyItem {
 
 interface MaintenanceRequestItem {
   id: string;
-  tenancyId: string;
-  tenantName: string;
-  property: string;
   title: string;
   category: string;
   priority: string;
   status: MaintenanceStatus;
-  assignedTo: string;
+  isRepeated: boolean;
+  resolution?: string | null;
+  property: { name: string };
+  room?: { roomNumber: string } | null;
+  reportedBy: { name: string; email: string };
+  tasks: Array<{ title: string; assignedTo?: string; estimatedCost?: number; actualCost?: number; status: MaintenanceStatus }>;
+  verifications: Array<{ verificationMethod: string; evidence?: string; confidence?: number | null; verifiedAt: string }>;
 }
 
 export default function OwnerDashboard() {
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
+  const [ownerFilter, setOwnerFilter] = useState<string>('OPEN');
 
   // Demo owner properties & tenancies
   const [properties, setProperties] = useState([
@@ -97,19 +101,23 @@ export default function OwnerDashboard() {
     },
   ]);
 
-  const [maintenanceRequests, setMaintenanceRequests] = useState<MaintenanceRequestItem[]>([
-    {
-      id: 'issue-1',
-      tenancyId: 'tenancy-2',
-      tenantName: 'Sneha Rao',
-      property: 'Nexus Studio Suites (Room 301)',
-      title: 'AC leaking water and cooling insufficient',
-      category: 'APPLIANCE',
-      priority: 'HIGH',
-      status: MaintenanceStatus.IN_PROGRESS,
-      assignedTo: 'CoolCare Services (Mr. Ramesh)',
-    },
-  ]);
+  const [maintenanceRequests, setMaintenanceRequests] = useState<MaintenanceRequestItem[]>([]);
+
+  useEffect(() => {
+    fetchOwnerMaintenance();
+  }, []);
+
+  async function fetchOwnerMaintenance() {
+    try {
+      const res = await fetch('/api/maintenance');
+      if (res.ok) {
+        const data = await res.json();
+        setMaintenanceRequests(data.issues || []);
+      }
+    } catch (err) {
+      console.warn('Could not load owner maintenance issues:', err);
+    }
+  }
 
   const handleAdvanceTenancyStage = async (tenancyId: string, nextStage: RentalLifecycle) => {
     try {
@@ -392,60 +400,247 @@ export default function OwnerDashboard() {
         </CardContent>
       </Card>
 
-      {/* Maintenance Requests Triage */}
+      {/* Owner Maintenance & Facility Oversight (7 Views) */}
       <Card className="border-slate-800 bg-slate-900/60">
-        <CardHeader className="flex flex-row items-center justify-between pb-3">
-          <div>
-            <CardTitle className="text-base text-white flex items-center gap-2">
-              <Wrench className="h-4 w-4 text-indigo-400" />
-              Pending Maintenance Triage
-            </CardTitle>
-            <CardDescription className="text-xs">
-              Direct vendor coordination and task tracking
-            </CardDescription>
+        <CardHeader className="pb-3">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+            <div>
+              <CardTitle className="text-base text-white flex items-center gap-2">
+                <Wrench className="h-4 w-4 text-indigo-400" />
+                Facility &amp; Maintenance Oversight
+              </CardTitle>
+              <CardDescription className="text-xs">
+                Real-time contractor management, urgent escalations, and closed-loop verification
+              </CardDescription>
+            </div>
+            <Link href="/maintenance">
+              <Button variant="outline" size="sm" className="text-xs border-slate-700 h-8 gap-1">
+                <span>View Full Workspace</span>
+                <ArrowUpRight className="h-3.5 w-3.5" />
+              </Button>
+            </Link>
           </div>
-          <Badge variant="secondary">{maintenanceRequests.length} Active</Badge>
+
+          {/* 7 Filter Tabs */}
+          <div className="flex items-center gap-1.5 overflow-x-auto pt-3 border-b border-slate-800 text-xs">
+            {[
+              {
+                key: 'OPEN',
+                label: 'Open Issues',
+                count: maintenanceRequests.filter(
+                  (r) => r.status !== MaintenanceStatus.CLOSED && r.status !== MaintenanceStatus.VERIFIED
+                ).length,
+              },
+              {
+                key: 'URGENT',
+                label: 'Urgent Issues',
+                count: maintenanceRequests.filter(
+                  (r) =>
+                    (r.priority === 'HIGH' || r.priority === 'EMERGENCY') &&
+                    r.status !== MaintenanceStatus.CLOSED
+                ).length,
+              },
+              {
+                key: 'ASSIGNED',
+                label: 'Assigned Tasks',
+                count: maintenanceRequests.filter((r) => r.tasks && r.tasks.length > 0).length,
+              },
+              {
+                key: 'IN_PROGRESS',
+                label: 'In Progress',
+                count: maintenanceRequests.filter(
+                  (r) =>
+                    r.status === MaintenanceStatus.IN_PROGRESS ||
+                    r.status === MaintenanceStatus.TASK_ASSIGNED
+                ).length,
+              },
+              {
+                key: 'VERIFICATION_PENDING',
+                label: 'Verification Pending',
+                count: maintenanceRequests.filter(
+                  (r) =>
+                    r.status === MaintenanceStatus.VERIFICATION_PENDING ||
+                    r.status === MaintenanceStatus.FIXED
+                ).length,
+              },
+              {
+                key: 'RESOLVED',
+                label: 'Resolved',
+                count: maintenanceRequests.filter(
+                  (r) =>
+                    r.status === MaintenanceStatus.VERIFIED ||
+                    r.status === MaintenanceStatus.CLOSED
+                ).length,
+              },
+              {
+                key: 'REPEATED',
+                label: 'Repeated Issues',
+                count: maintenanceRequests.filter((r) => r.isRepeated).length,
+              },
+            ].map((tab) => (
+              <button
+                key={tab.key}
+                onClick={() => setOwnerFilter(tab.key)}
+                className={`px-3 py-1.5 rounded-lg font-medium transition-all flex items-center gap-1.5 whitespace-nowrap ${
+                  ownerFilter === tab.key
+                    ? 'bg-indigo-600 text-white shadow-sm shadow-indigo-600/30'
+                    : 'text-slate-400 hover:text-white hover:bg-slate-900'
+                }`}
+              >
+                <span>{tab.label}</span>
+                <span
+                  className={`text-[10px] px-1.5 py-0.2 rounded-full font-bold ${
+                    ownerFilter === tab.key
+                      ? 'bg-white/20 text-white'
+                      : 'bg-slate-800 text-slate-400'
+                  }`}
+                >
+                  {tab.count}
+                </span>
+              </button>
+            ))}
+          </div>
         </CardHeader>
 
-        <CardContent className="space-y-3">
-          {maintenanceRequests.map((req) => (
-            <div
-              key={req.id}
-              className="p-4 rounded-xl bg-slate-950/60 border border-slate-800 flex flex-col md:flex-row md:items-center justify-between gap-4 text-xs"
-            >
-              <div>
-                <div className="flex items-center gap-2">
-                  <span className="px-2 py-0.5 rounded text-[10px] font-bold uppercase bg-rose-500/15 text-rose-300 border border-rose-500/30">
-                    {req.priority}
-                  </span>
-                  <span className="text-slate-400">{req.property}</span>
-                </div>
-                <h4 className="text-sm font-semibold text-white mt-1">{req.title}</h4>
-                <p className="text-slate-400 mt-0.5">
-                  Reported by: <span className="text-slate-200">{req.tenantName}</span> • Assigned to: <span className="text-indigo-300">{req.assignedTo}</span>
-                </p>
-              </div>
+        <CardContent className="space-y-3 pt-2">
+          {(() => {
+            const filtered = maintenanceRequests.filter((req) => {
+              if (ownerFilter === 'OPEN')
+                return req.status !== MaintenanceStatus.CLOSED && req.status !== MaintenanceStatus.VERIFIED;
+              if (ownerFilter === 'URGENT')
+                return (
+                  (req.priority === 'HIGH' || req.priority === 'EMERGENCY') &&
+                  req.status !== MaintenanceStatus.CLOSED
+                );
+              if (ownerFilter === 'ASSIGNED') return req.tasks && req.tasks.length > 0;
+              if (ownerFilter === 'IN_PROGRESS')
+                return (
+                  req.status === MaintenanceStatus.IN_PROGRESS ||
+                  req.status === MaintenanceStatus.TASK_ASSIGNED
+                );
+              if (ownerFilter === 'VERIFICATION_PENDING')
+                return (
+                  req.status === MaintenanceStatus.VERIFICATION_PENDING ||
+                  req.status === MaintenanceStatus.FIXED
+                );
+              if (ownerFilter === 'RESOLVED')
+                return (
+                  req.status === MaintenanceStatus.VERIFIED ||
+                  req.status === MaintenanceStatus.CLOSED
+                );
+              if (ownerFilter === 'REPEATED') return req.isRepeated;
+              return true;
+            });
 
-              <div className="flex items-center gap-2 shrink-0">
-                <Button
-                  size="sm"
-                  variant="outline"
-                  className="h-8 text-xs border-slate-700 hover:bg-slate-800"
-                  onClick={() => handleUpdateMaintenance(req.id, MaintenanceStatus.FIXED)}
+            if (filtered.length === 0) {
+              return (
+                <div className="p-8 text-center text-slate-500 text-xs">
+                  No issues found in this category.
+                </div>
+              );
+            }
+
+            return filtered.map((req) => {
+              const latestTask = req.tasks?.[req.tasks.length - 1];
+              const latestVerification = req.verifications?.[0];
+
+              return (
+                <div
+                  key={req.id}
+                  className={`p-4 rounded-xl bg-slate-950/70 border border-slate-800 flex flex-col md:flex-row md:items-center justify-between gap-4 text-xs ${
+                    req.isRepeated ? 'ring-1 ring-amber-500/30' : ''
+                  }`}
                 >
-                  <CheckCircle2 className="h-3.5 w-3.5 mr-1 text-emerald-400" />
-                  Mark Resolved
-                </Button>
-                <Button
-                  size="sm"
-                  className="h-8 text-xs bg-indigo-600 hover:bg-indigo-500"
-                  onClick={() => handleUpdateMaintenance(req.id, MaintenanceStatus.VERIFIED)}
-                >
-                  Verify Fix
-                </Button>
-              </div>
-            </div>
-          ))}
+                  <div className="space-y-1.5 flex-1">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span
+                        className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${
+                          req.priority === 'HIGH' || req.priority === 'EMERGENCY'
+                            ? 'bg-rose-500/15 text-rose-300 border border-rose-500/30'
+                            : 'bg-amber-500/15 text-amber-300 border border-amber-500/30'
+                        }`}
+                      >
+                        {req.priority}
+                      </span>
+                      <span className="text-indigo-400 font-medium">{req.category}</span>
+                      {req.isRepeated && (
+                        <span className="px-1.5 py-0.5 rounded text-[10px] bg-amber-500/20 text-amber-300 border border-amber-500/40 font-bold">
+                          ⚠️ Repeated Issue
+                        </span>
+                      )}
+                      <span className="text-slate-500">•</span>
+                      <span className="text-slate-400">
+                        {req.property.name}
+                        {req.room ? ` (Room ${req.room.roomNumber})` : ''}
+                      </span>
+                    </div>
+
+                    <h4 className="text-sm font-bold text-white tracking-tight">{req.title}</h4>
+
+                    <div className="text-[11px] text-slate-400 space-y-0.5">
+                      <p>
+                        Reported by: <span className="text-slate-200">{req.reportedBy.name}</span>
+                        {latestTask?.assignedTo && (
+                          <>
+                            {' '}• Contractor: <span className="text-indigo-300">{latestTask.assignedTo}</span>
+                          </>
+                        )}
+                      </p>
+                      {req.resolution && (
+                        <p className="text-emerald-400 font-medium">
+                          Resolution: {req.resolution}
+                        </p>
+                      )}
+                      {latestVerification && (
+                        <p className="text-sky-400">
+                          Proof: {latestVerification.evidence} ({latestVerification.verificationMethod})
+                        </p>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="flex flex-col sm:items-end justify-between gap-2 shrink-0">
+                    <Badge
+                      variant={
+                        req.status === MaintenanceStatus.VERIFIED || req.status === MaintenanceStatus.CLOSED
+                          ? 'success'
+                          : req.status === MaintenanceStatus.IN_PROGRESS
+                          ? 'warning'
+                          : 'secondary'
+                      }
+                      className="text-[10px]"
+                    >
+                      {req.status}
+                    </Badge>
+
+                    <div className="flex items-center gap-1.5">
+                      {req.status !== MaintenanceStatus.CLOSED && req.status !== MaintenanceStatus.VERIFIED && (
+                        <>
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            className="h-7 text-xs border-slate-700 hover:bg-slate-800"
+                            onClick={() => handleUpdateMaintenance(req.id, MaintenanceStatus.FIXED)}
+                          >
+                            <CheckCircle2 className="h-3 w-3 mr-1 text-emerald-400" />
+                            Mark Fixed
+                          </Button>
+                          <Link href="/maintenance">
+                            <Button
+                              size="sm"
+                              className="h-7 text-xs bg-indigo-600 hover:bg-indigo-500"
+                            >
+                              Verify &amp; Close
+                            </Button>
+                          </Link>
+                        </>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              );
+            });
+          })()}
         </CardContent>
       </Card>
     </div>
