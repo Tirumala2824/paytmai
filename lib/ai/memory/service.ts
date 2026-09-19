@@ -84,9 +84,37 @@ export interface RelevantContextResult {
   summary: string;
 }
 
-const COGNEE_API_BASE = process.env.COGNEE_API_URL || 'https://api.cognee.ai';
+export interface KnowledgeSearchResult {
+  id: string;
+  category: string;
+  key?: string | null;
+  summary: string;
+  content?: any;
+  propertyName?: string;
+  propertyAddress?: string;
+  score: number;
+  source: 'COGNEE_API' | 'LOCAL_GRAPH';
+}
 
-function getCogneeApiKey(): string | undefined {
+export interface SearchKnowledgeGraphParams {
+  query: string;
+  propertyId?: string;
+  propertyName?: string;
+  userProfileId?: string;
+  category?: string;
+  limit?: number;
+}
+
+export function getCogneeApiBase(): string {
+  const url =
+    process.env.COGNEE_BASE_URL ||
+    process.env.COGNEE_SERVICE_URL ||
+    process.env.COGNEE_API_URL ||
+    'https://api.cognee.ai';
+  return url.trim().replace(/\/+$/, '');
+}
+
+export function getCogneeApiKey(): string | undefined {
   const key = process.env.COGNEE_API_KEY;
   if (!key || key.includes('placeholder') || key === 'undefined' || key.trim().length === 0) {
     return undefined;
@@ -131,30 +159,54 @@ export class MemoryService {
 
     // 1. Send to Cognee API if configured
     const apiKey = getCogneeApiKey();
+    const baseUrl = getCogneeApiBase();
     if (apiKey) {
       try {
-        const res = await fetch(`${COGNEE_API_BASE}/api/v1/memory/add`, {
+        const datasetName = 'havendex_supabase_graph';
+        const payloadText = JSON.stringify(
+          {
+            memoryType,
+            key,
+            summary,
+            content: safeContent,
+            user_id: userProfileId,
+            tenancyId,
+            propertyId,
+            timestamp: new Date().toISOString(),
+          },
+          null,
+          2
+        );
+
+        const formData = new FormData();
+        const file = new File(
+          [payloadText],
+          `mem_${memoryType.toLowerCase()}_${key || Date.now()}.json`,
+          { type: 'application/json' }
+        );
+        formData.append('data', file);
+        formData.append('datasetName', datasetName);
+
+        const res = await fetch(`${baseUrl}/api/v1/add`, {
           method: 'POST',
           headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${apiKey}`,
+            'X-Api-Key': apiKey,
           },
-          body: JSON.stringify({
-            user_id: userProfileId,
-            dataset_name: `havendex_${tenancyId || userProfileId}`,
-            data: {
-              memoryType,
-              key,
-              summary,
-              content: safeContent,
-              timestamp: new Date().toISOString(),
-            },
-          }),
-          signal: AbortSignal.timeout(1500),
+          body: formData,
+          signal: AbortSignal.timeout(5000),
         });
 
         if (res.ok) {
           source = 'COGNEE_API';
+          // Trigger cognify asynchronously
+          fetch(`${baseUrl}/api/v1/cognify`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'X-Api-Key': apiKey,
+            },
+            body: JSON.stringify({ datasets: [datasetName] }),
+          }).catch(() => {});
         }
       } catch (err: any) {
         console.warn('Cognee API add failed, using persistent local graph:', err.message);
@@ -256,38 +308,52 @@ export class MemoryService {
     const apiKey = getCogneeApiKey();
 
     // Try Cognee API Search
+    const baseUrl = getCogneeApiBase();
     if (apiKey) {
       try {
-        const res = await fetch(`${COGNEE_API_BASE}/api/v1/memory/search`, {
+        const res = await fetch(`${baseUrl}/api/v1/search`, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
-            Authorization: `Bearer ${apiKey}`,
+            'X-Api-Key': apiKey,
           },
           body: JSON.stringify({
-            user_id: userProfileId,
             query,
-            limit,
+            datasets: ['havendex_supabase_graph'],
+            search_type: 'CHUNKS',
           }),
-          signal: AbortSignal.timeout(1500),
+          signal: AbortSignal.timeout(5000),
         });
 
         if (res.ok) {
           const data = await res.json();
-          if (Array.isArray(data.results) && data.results.length > 0) {
-            return data.results.map((r: any) => ({
-              id: r.id || `cognee-${Date.now()}`,
+          const items: any[] = [];
+          if (Array.isArray(data)) {
+            for (const entry of data) {
+              if (Array.isArray(entry?.search_result)) {
+                items.push(...entry.search_result);
+              } else if (entry?.search_result) {
+                items.push(entry.search_result);
+              } else {
+                items.push(entry);
+              }
+            }
+          }
+
+          if (items.length > 0) {
+            return items.slice(0, limit).map((r: any, idx: number) => ({
+              id: r.id || `cognee-${Date.now()}-${idx}`,
               userProfileId,
               tenancyId,
               propertyId,
-              memoryType: r.memoryType || 'INTERACTION_SUMMARY',
-              key: r.key,
-              summary: r.summary || r.text,
-              content: r.content || r.metadata,
-              confidence: r.confidence || 0.95,
+              memoryType: 'KNOWLEDGE_BASE',
+              key: r.name || `chunk-${idx + 1}`,
+              summary: typeof r === 'string' ? r : r.text || r.summary || JSON.stringify(r),
+              content: r,
+              confidence: 0.95,
               source: 'COGNEE_API',
-              createdAt: new Date(r.timestamp || Date.now()),
-              score: r.score || 0.9,
+              createdAt: new Date(),
+              score: 0.9,
             }));
           }
         }
@@ -298,10 +364,16 @@ export class MemoryService {
 
     // Local semantic scoring fallback across user, tenancy, and property
     const allMemories = await this.retrieve({ userProfileId, tenancyId, propertyId, limit: 100 });
-    const queryTokens = query
+    const STOP_WORDS = new Set([
+      'what', 'is', 'are', 'the', 'of', 'in', 'at', 'for', 'to', 'a', 'an', 'and', 'my', 'our',
+      'your', 'please', 'tell', 'me', 'show', 'when', 'does', 'how', 'do', 'any', 'about'
+    ]);
+    const rawTokens = query
       .toLowerCase()
       .split(/\W+/)
-      .filter((t) => t.length > 2);
+      .filter((t) => t.length > 1);
+    const meaningfulTokens = rawTokens.filter((t) => !STOP_WORDS.has(t));
+    const queryTokens = meaningfulTokens.length > 0 ? meaningfulTokens : rawTokens;
 
     const scored = allMemories.map((m) => {
       const textToMatch = `${m.summary} ${m.key || ''} ${JSON.stringify(m.content || {})}`.toLowerCase();
@@ -319,6 +391,176 @@ export class MemoryService {
 
     return scored
       .filter((m) => m.score > 0)
+      .sort((a, b) => b.score - a.score)
+      .slice(0, limit);
+  }
+
+  /**
+   * Dedicated Hybrid RAG Search Engine across Rental Knowledge Graph.
+   * Retrieves Wi-Fi credentials, mess timings, gate rules, amenities, and facility specs.
+   */
+  async searchKnowledgeGraph(params: SearchKnowledgeGraphParams): Promise<KnowledgeSearchResult[]> {
+    const { query, userProfileId, category, limit = 8 } = params;
+    let propertyId = params.propertyId;
+    const lowerQuery = query.toLowerCase();
+
+    // 1. Resolve property by name or tenant context if not directly provided
+    if (!propertyId && params.propertyName) {
+      const prop = await prisma.property.findFirst({
+        where: { name: { contains: params.propertyName, mode: 'insensitive' } },
+        select: { id: true },
+      });
+      if (prop) propertyId = prop.id;
+    }
+
+    if (!propertyId) {
+      // Check if property name is mentioned inside query string
+      const knownProperties = [
+        { name: 'Nexus Grand PG', idMatch: 'nexus' },
+        { name: 'CyberCity PG', idMatch: 'cyber' },
+        { name: 'UrbanNest Luxury Suites', idMatch: 'urban' },
+        { name: 'Green Glen Residency', idMatch: 'green' },
+        { name: 'Deccan Comfort PG', idMatch: 'deccan' },
+        { name: 'Silicon Residency', idMatch: 'silicon' },
+        { name: 'Whitefield Coliving', idMatch: 'whitefield' },
+        { name: 'Hitec City Stay', idMatch: 'hitec' },
+      ];
+      for (const kp of knownProperties) {
+        if (lowerQuery.includes(kp.idMatch)) {
+          const matchedProp = await prisma.property.findFirst({
+            where: { name: { contains: kp.name, mode: 'insensitive' } },
+            select: { id: true },
+          });
+          if (matchedProp) {
+            propertyId = matchedProp.id;
+            break;
+          }
+        }
+      }
+    }
+
+    // If still no propertyId and user is a tenant, use active tenancy's propertyId
+    if (!propertyId && userProfileId) {
+      const tenant = await prisma.tenant.findUnique({
+        where: { userProfileId },
+        include: { tenancies: { where: { isActive: true }, select: { propertyId: true }, take: 1 } },
+      });
+      if (tenant?.tenancies[0]) {
+        propertyId = tenant.tenancies[0].propertyId;
+      }
+    }
+
+    // 2. Stop words filtering
+    const STOP_WORDS = new Set([
+      'what', 'is', 'are', 'the', 'of', 'in', 'at', 'for', 'to', 'a', 'an', 'and', 'my', 'our',
+      'your', 'please', 'tell', 'me', 'show', 'when', 'does', 'how', 'do', 'any', 'about', 'timing', 'timings'
+    ]);
+    const rawTokens = lowerQuery.split(/\W+/).filter((t) => t.length > 1);
+    const meaningfulTokens = rawTokens.filter((t) => !STOP_WORDS.has(t));
+    const searchTokens = meaningfulTokens.length > 0 ? meaningfulTokens : rawTokens;
+
+    // 3. Category mapping
+    const categoryTypeMap: Record<string, string[]> = {
+      WIFI: ['PROPERTY_WIFI'],
+      MESS: ['MESS_SCHEDULE'],
+      RULES: ['PROPERTY_RULES'],
+      FACILITY: ['FACILITY_SPEC'],
+      APPLIANCE: ['APPLIANCE_SPEC', 'MAINTENANCE_RESOLUTION'],
+      TENANCY: ['TENANCY_RELATION'],
+    };
+
+    let targetMemoryTypes: string[] | undefined = undefined;
+    if (category && category !== 'ALL' && categoryTypeMap[category.toUpperCase()]) {
+      targetMemoryTypes = categoryTypeMap[category.toUpperCase()];
+    } else {
+      // Auto-detect category from query
+      if (lowerQuery.includes('wifi') || lowerQuery.includes('wi-fi') || lowerQuery.includes('password') || lowerQuery.includes('internet') || lowerQuery.includes('ssid')) {
+        targetMemoryTypes = ['PROPERTY_WIFI'];
+      } else if (lowerQuery.includes('mess') || lowerQuery.includes('food') || lowerQuery.includes('dinner') || lowerQuery.includes('lunch') || lowerQuery.includes('breakfast') || lowerQuery.includes('meal') || lowerQuery.includes('biryani') || lowerQuery.includes('khana')) {
+        targetMemoryTypes = ['MESS_SCHEDULE'];
+      } else if (lowerQuery.includes('rule') || lowerQuery.includes('gate') || lowerQuery.includes('curfew') || lowerQuery.includes('visitor') || lowerQuery.includes('guest') || lowerQuery.includes('quiet') || lowerQuery.includes('alcohol') || lowerQuery.includes('smoke')) {
+        targetMemoryTypes = ['PROPERTY_RULES'];
+      } else if (lowerQuery.includes('gym') || lowerQuery.includes('laundry') || lowerQuery.includes('washing') || lowerQuery.includes('parking') || lowerQuery.includes('lift') || lowerQuery.includes('amenities') || lowerQuery.includes('facility')) {
+        targetMemoryTypes = ['FACILITY_SPEC'];
+      }
+    }
+
+    // 4. Fetch candidate memories from Prisma RentalMemory
+    const where: any = {};
+    if (targetMemoryTypes) {
+      where.memoryType = { in: targetMemoryTypes };
+    }
+    if (propertyId) {
+      where.OR = [{ propertyId }, { propertyId: null }];
+    }
+
+    const candidates = await prisma.rentalMemory.findMany({
+      where,
+      take: 60,
+      orderBy: { createdAt: 'desc' },
+    });
+
+    // If query with propertyId returned no results, search across all properties as fallback
+    let allCandidates = candidates;
+    if (candidates.length === 0 && propertyId) {
+      allCandidates = await prisma.rentalMemory.findMany({
+        where: targetMemoryTypes ? { memoryType: { in: targetMemoryTypes } } : {},
+        take: 60,
+        orderBy: { createdAt: 'desc' },
+      });
+    }
+
+    // Resolve property metadata in batch
+    const pIds = Array.from(new Set(allCandidates.map((c) => c.propertyId).filter(Boolean))) as string[];
+    const propertyMap = new Map<string, { name: string; address: string; city: string }>();
+    if (pIds.length > 0) {
+      const properties = await prisma.property.findMany({
+        where: { id: { in: pIds } },
+        select: { id: true, name: true, address: true, city: true },
+      });
+      properties.forEach((p) => propertyMap.set(p.id, p));
+    }
+
+    // 5. Score candidates
+    const scored = allCandidates.map((record) => {
+      const prop = record.propertyId ? propertyMap.get(record.propertyId) : undefined;
+      const textToMatch = `${record.summary} ${record.key || ''} ${prop?.name || ''} ${JSON.stringify(record.content || {})}`.toLowerCase();
+      let score = 0;
+
+      // Exact substring match
+      if (textToMatch.includes(lowerQuery)) {
+        score += 5.0;
+      }
+
+      for (const token of searchTokens) {
+        if (textToMatch.includes(token)) {
+          score += 2.0;
+        }
+        if (record.key && record.key.toLowerCase().includes(token)) {
+          score += 3.0;
+        }
+      }
+
+      // Bonus if matches target property
+      if (propertyId && record.propertyId === propertyId) {
+        score += 2.0;
+      }
+
+      return {
+        id: record.id,
+        category: record.memoryType,
+        key: record.key,
+        summary: record.summary,
+        content: record.content,
+        propertyName: prop?.name,
+        propertyAddress: prop ? `${prop.address}, ${prop.city}` : undefined,
+        score,
+        source: record.source as any,
+      };
+    });
+
+    return scored
+      .filter((s) => s.score > 0)
       .sort((a, b) => b.score - a.score)
       .slice(0, limit);
   }

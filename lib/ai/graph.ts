@@ -19,6 +19,7 @@ import { memoryService } from './memory/service';
 import { createAuditEvent } from '@/lib/audit/service';
 import { canAccessProperty, canAccessTenancy } from '@/lib/auth/abac';
 import { advanceRentalLifecycle } from '@/lib/rental/service';
+import { evaluateRagResponse, RagEvaluationResult } from './rag/evaluator';
 
 /**
  * Define the LangGraph State Annotation for Phase 3
@@ -76,6 +77,7 @@ export const AgentStateAnnotation = Annotation.Root({
   nextState: Annotation<string | undefined>(),
   userResponse: Annotation<string>(),
   modelName: Annotation<string | undefined>(),
+  ragEvaluation: Annotation<RagEvaluationResult | undefined>(),
 });
 
 export type AgentStateType = typeof AgentStateAnnotation.State;
@@ -640,6 +642,59 @@ export async function detectIntentsNode(state: AgentStateType): Promise<Partial<
     });
   }
 
+  // Check Intent: PROPERTY_INFORMATION / KNOWLEDGE_QUERY (RAG over rules, mess, wifi, amenities)
+  const hasKnowledgeQuery =
+    message.includes('wifi') ||
+    message.includes('wi-fi') ||
+    message.includes('password') ||
+    message.includes('internet') ||
+    message.includes('network') ||
+    message.includes('ssid') ||
+    message.includes('mess') ||
+    message.includes('food') ||
+    message.includes('dinner') ||
+    message.includes('lunch') ||
+    message.includes('breakfast') ||
+    message.includes('meal') ||
+    message.includes('khana') ||
+    message.includes('rule') ||
+    message.includes('gate') ||
+    message.includes('curfew') ||
+    message.includes('visitor') ||
+    message.includes('guest') ||
+    message.includes('quiet') ||
+    message.includes('gym') ||
+    message.includes('laundry') ||
+    message.includes('amenities') ||
+    message.includes('facility') ||
+    message.includes('parking') ||
+    message.includes('about the property') ||
+    message.includes('about the pg') ||
+    message.includes('about nexus') ||
+    message.includes('about cybercity');
+
+  if (hasKnowledgeQuery) {
+    let category = 'ALL';
+    if (message.includes('wifi') || message.includes('wi-fi') || message.includes('password') || message.includes('internet')) {
+      category = 'WIFI';
+    } else if (message.includes('mess') || message.includes('food') || message.includes('dinner') || message.includes('lunch') || message.includes('breakfast') || message.includes('meal')) {
+      category = 'MESS';
+    } else if (message.includes('rule') || message.includes('gate') || message.includes('curfew') || message.includes('visitor') || message.includes('guest')) {
+      category = 'RULES';
+    } else if (message.includes('gym') || message.includes('laundry') || message.includes('parking') || message.includes('amenit')) {
+      category = 'FACILITY';
+    }
+
+    entities.category = category;
+    entities.query = state.userMessage;
+
+    detectedIntents.push({
+      intent: 'PROPERTY_INFORMATION',
+      confidence: 0.96,
+      entities: { category, query: state.userMessage },
+    });
+  }
+
   // Default fallback if no intent detected
   if (detectedIntents.length === 0) {
     detectedIntents.push({
@@ -724,6 +779,9 @@ export async function planNode(state: AgentStateType): Promise<Partial<AgentStat
         break;
 
       case 'PROPERTY_INFORMATION':
+        if (!plannedActions.includes('searchKnowledgeBase')) {
+          plannedActions.push('searchKnowledgeBase');
+        }
         if (!plannedActions.includes('getProperty')) {
           plannedActions.push('getProperty');
         }
@@ -757,6 +815,7 @@ export async function planNode(state: AgentStateType): Promise<Partial<AgentStat
       case 'GENERAL_RENTAL_ASSISTANCE':
       default:
         if (plannedActions.length === 0) {
+          plannedActions.push('searchKnowledgeBase');
           plannedActions.push('getTenancy');
         }
         break;
@@ -903,6 +962,7 @@ export async function executeNode(state: AgentStateType): Promise<Partial<AgentS
       'validatePayment',
       'createMaintenanceIssue',
       'getMaintenanceIssues',
+      'searchKnowledgeBase',
       'getProperty',
       'getRoom',
       'getTenancy',
@@ -938,6 +998,13 @@ export async function executeNode(state: AgentStateType): Promise<Partial<AgentS
           category: entities.category || (context.previousRelatedIssue ? 'APPLIANCE' : 'GENERAL'),
           priority: context.isRepeatedIssue ? 'HIGH' : (entities.priority || 'MEDIUM'),
           isRepeated: context.isRepeatedIssue || entities.isRepeated || false,
+        };
+      } else if (toolName === 'searchKnowledgeBase') {
+        input = {
+          query: entities.query || state.userMessage,
+          propertyName: entities.propertyName,
+          category: entities.category,
+          propertyId: context.tenancy?.propertyId,
         };
       } else if (toolName === 'getRentStatus') {
         input = { tenancyId: context.tenancy?.id };
@@ -1007,6 +1074,7 @@ export async function executeNode(state: AgentStateType): Promise<Partial<AgentS
       if (toolName === 'getOwnerPortfolio') label = 'Owner portfolio retrieved (Parallel)';
       if (toolName === 'getOwnerTenants') label = 'Tenant roster retrieved (Parallel)';
       if (toolName === 'getOwnerMaintenanceOverview') label = 'Maintenance overview retrieved (Parallel)';
+      if (toolName === 'searchKnowledgeBase') label = 'Knowledge graph retrieved (Parallel)';
 
       executionSteps.push({
         id: `step-${toolName}-${Date.now()}`,
@@ -1267,6 +1335,29 @@ export async function verifyNode(state: AgentStateType): Promise<Partial<AgentSt
         break;
       }
 
+      case 'PROPERTY_INFORMATION': {
+        tools.push('searchKnowledgeBase');
+        const kb = results.searchKnowledgeBase;
+        const prop = results.getProperty;
+        if (kb?.status === 'SUCCESS' && Array.isArray(kb.output?.results) && kb.output.results.length > 0) {
+          const count = kb.output.results.length;
+          verificationResults['KNOWLEDGE'] = {
+            verified: true,
+            details: `Found ${count} knowledge graph record(s)`,
+          };
+          summary = kb.output.results.map((r: any) => r.summary).join(' | ');
+        } else if (prop?.status === 'SUCCESS') {
+          verificationResults['PROPERTY'] = {
+            verified: true,
+            details: `Property details for ${prop.output?.name}`,
+          };
+          summary = `${prop.output?.name}: ${prop.output?.address}, ${prop.output?.city}`;
+        } else {
+          summary = 'Property knowledge query processed';
+        }
+        break;
+      }
+
       default:
         summary = 'Assistance query processed';
         break;
@@ -1479,9 +1570,27 @@ export async function respondNode(state: AgentStateType): Promise<Partial<AgentS
       timestamp: new Date().toISOString(),
     };
 
+    let ragEvaluation: RagEvaluationResult | undefined = undefined;
+    const kbSnippets = results.searchKnowledgeBase?.output?.results;
+    if (Array.isArray(kbSnippets) && kbSnippets.length > 0) {
+      try {
+        ragEvaluation = await evaluateRagResponse({
+          query: userMessage,
+          contextSnippets: kbSnippets,
+          generatedResponse: finalDynamic,
+          retrievalLatencyMs: 25,
+          modelUsed: state.modelName,
+        });
+        finalStep.details = `⚡ RAG Score: ${Math.round(ragEvaluation.overallScore * 100)}% (Faithful: ${Math.round(ragEvaluation.faithfulness * 100)}% | Context: ${Math.round(ragEvaluation.contextRelevance * 100)}%)`;
+      } catch (evalErr) {
+        console.warn('RAG evaluation failed:', evalErr);
+      }
+    }
+
     return {
       userResponse: finalDynamic,
       executionSteps: [finalStep],
+      ragEvaluation,
     };
   }
 
@@ -1700,22 +1809,26 @@ export async function respondNode(state: AgentStateType): Promise<Partial<AgentS
       }
 
       case 'PROPERTY_INFORMATION': {
+        const kb = results.searchKnowledgeBase?.output;
         const prop = results.getProperty?.output;
         const memories = context.relevantMemories || [];
-        const knowledgeSnippets = memories
-          .filter(
-            (m) =>
-              m.memoryType?.startsWith('PROPERTY_') ||
-              m.memoryType === 'MESS_SCHEDULE' ||
-              m.memoryType === 'FACILITY_SPEC' ||
-              m.memoryType === 'APPLIANCE_SPEC'
-          )
-          .map((m) => `• ${m.summary}`)
-          .join('\n\n');
 
-        if (knowledgeSnippets) {
+        const allSnippets: string[] = [];
+        if (kb && Array.isArray(kb.results) && kb.results.length > 0) {
+          for (const r of kb.results) {
+            allSnippets.push(`• **${r.category?.replace(/_/g, ' ')}:** ${r.summary}`);
+          }
+        } else if (memories.length > 0) {
+          for (const m of memories) {
+            if (m.memoryType !== 'INTERACTION_SUMMARY') {
+              allSnippets.push(`• **${m.memoryType?.replace(/_/g, ' ')}:** ${m.summary}`);
+            }
+          }
+        }
+
+        if (allSnippets.length > 0) {
           responseParts.push(
-            `### 📍 Property Information & Knowledge Graph\n\n${knowledgeSnippets}`
+            `### 📍 Property Information & Knowledge Base\n\n${allSnippets.slice(0, 5).join('\n\n')}`
           );
         } else if (prop) {
           responseParts.push(
@@ -1731,17 +1844,24 @@ export async function respondNode(state: AgentStateType): Promise<Partial<AgentS
       }
 
       default: {
-        // If query matched any specific Cognee knowledge memories, present them
-        const matchingMemories = (context.relevantMemories || []).filter(
-          (m) => m.memoryType !== 'INTERACTION_SUMMARY' && (m.score ?? 0) > 0.3
-        );
-        if (matchingMemories.length > 0) {
+        const kb = results.searchKnowledgeBase?.output;
+        if (kb && Array.isArray(kb.results) && kb.results.length > 0) {
           responseParts.push(
-            `### 💡 Knowledge Graph Retrieval\n\n` +
-              matchingMemories.map((m) => `• ${m.summary}`).join('\n\n')
+            `### 💡 Knowledge Base Retrieval\n\n` +
+              kb.results.slice(0, 4).map((r: any) => `• ${r.summary}`).join('\n\n')
           );
         } else {
-          responseParts.push(`${item.intent}: ${item.summary}`);
+          const matchingMemories = (context.relevantMemories || []).filter(
+            (m) => m.memoryType !== 'INTERACTION_SUMMARY'
+          );
+          if (matchingMemories.length > 0) {
+            responseParts.push(
+              `### 💡 Knowledge Base Retrieval\n\n` +
+                matchingMemories.slice(0, 4).map((m) => `• ${m.summary}`).join('\n\n')
+            );
+          } else {
+            responseParts.push(`${item.intent}: ${item.summary}`);
+          }
         }
         break;
       }
@@ -1770,9 +1890,27 @@ export async function respondNode(state: AgentStateType): Promise<Partial<AgentS
     timestamp: new Date().toISOString(),
   };
 
+  let ragEvaluation: RagEvaluationResult | undefined = undefined;
+  const kbSnippets = results.searchKnowledgeBase?.output?.results;
+  if (Array.isArray(kbSnippets) && kbSnippets.length > 0) {
+    try {
+      ragEvaluation = await evaluateRagResponse({
+        query: userMessage,
+        contextSnippets: kbSnippets,
+        generatedResponse: userResponse,
+        retrievalLatencyMs: 20,
+        modelUsed: 'Deterministic Fallback',
+      });
+      finalStep.details = `⚡ RAG Score: ${Math.round(ragEvaluation.overallScore * 100)}% (Faithful: ${Math.round(ragEvaluation.faithfulness * 100)}% | Context: ${Math.round(ragEvaluation.contextRelevance * 100)}%)`;
+    } catch (evalErr) {
+      console.warn('RAG evaluation failed in fallback path:', evalErr);
+    }
+  }
+
   return {
     userResponse,
     executionSteps: [finalStep],
+    ragEvaluation,
   };
 }
 

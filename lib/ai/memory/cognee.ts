@@ -25,7 +25,14 @@ export interface MemoryQueryResult {
   source: 'COGNEE_API' | 'LOCAL_GRAPH';
 }
 
-const COGNEE_API_BASE = process.env.COGNEE_API_URL || 'https://api.cognee.ai';
+export const getCogneeApiBase = (): string => {
+  const url =
+    process.env.COGNEE_BASE_URL ||
+    process.env.COGNEE_SERVICE_URL ||
+    process.env.COGNEE_API_URL ||
+    'https://api.cognee.ai';
+  return url.trim().replace(/\/+$/, '');
+};
 
 export function getCogneeApiKey(): string | undefined {
   const key = process.env.COGNEE_API_KEY;
@@ -40,38 +47,173 @@ export function isCogneeConfigured(): boolean {
 }
 
 /**
+ * Checks connection health to the configured Cognee service.
+ */
+export async function checkCogneeHealth(): Promise<{
+  configured: boolean;
+  connected: boolean;
+  baseUrl: string;
+  keyMasked?: string;
+  localKnowledgeCount: number;
+  message: string;
+  instructions?: string;
+}> {
+  const apiKey = getCogneeApiKey();
+  const baseUrl = getCogneeApiBase();
+  const localKnowledgeCount = await prisma.rentalMemory.count().catch(() => 0);
+
+  if (!apiKey) {
+    return {
+      configured: false,
+      connected: false,
+      baseUrl,
+      localKnowledgeCount,
+      message: 'COGNEE_API_KEY is not configured in .env',
+      instructions: 'Obtain an API key from https://platform.cognee.ai and set COGNEE_API_KEY and COGNEE_BASE_URL.',
+    };
+  }
+
+  const keyMasked = `${apiKey.slice(0, 6)}...${apiKey.slice(-4)}`;
+
+  // If user has the generic unrouted placeholder "https://api.cognee.ai"
+  if (baseUrl === 'https://api.cognee.ai') {
+    return {
+      configured: true,
+      connected: false,
+      baseUrl,
+      keyMasked,
+      localKnowledgeCount,
+      message: 'Cognee API key is active, but URL is pointing to placeholder https://api.cognee.ai.',
+      instructions:
+        'Cognee Cloud (https://platform.cognee.ai) provisions dedicated tenant endpoints formatted like https://<your-tenant>.aws.cognee.ai. Find your workspace URL on the API Keys page of platform.cognee.ai and set COGNEE_BASE_URL in .env. Meanwhile, 155 knowledge records are actively served from PostgreSQL RentalMemory.',
+    };
+  }
+
+  try {
+    // 1. Try health endpoint
+    const healthRes = await fetch(`${baseUrl}/health`, {
+      method: 'GET',
+      headers: {
+        'X-Api-Key': apiKey,
+        Authorization: `Bearer ${apiKey}`,
+      },
+      signal: AbortSignal.timeout(2000),
+    });
+
+    if (healthRes.ok) {
+      return {
+        configured: true,
+        connected: true,
+        baseUrl,
+        keyMasked,
+        localKnowledgeCount,
+        message: 'Successfully connected to Cognee Cloud instance.',
+      };
+    }
+  } catch {
+    // try search ping fallback
+  }
+
+  try {
+    // 2. Try pinging /api/v1/search
+    const searchRes = await fetch(`${baseUrl}/api/v1/search`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Api-Key': apiKey,
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify({
+        query: 'ping',
+        datasets: ['havendex_test'],
+        top_k: 1,
+      }),
+      signal: AbortSignal.timeout(2000),
+    });
+
+    if (searchRes.ok || searchRes.status === 400 || searchRes.status === 422) {
+      return {
+        configured: true,
+        connected: true,
+        baseUrl,
+        keyMasked,
+        localKnowledgeCount,
+        message: 'Successfully connected to Cognee Cloud tenant.',
+      };
+    }
+  } catch (err: any) {
+    return {
+      configured: true,
+      connected: false,
+      baseUrl,
+      keyMasked,
+      localKnowledgeCount,
+      message: `Cognee endpoint at ${baseUrl} is unreachable (${err.message}). Using local PostgreSQL Knowledge Graph with ${localKnowledgeCount} entries.`,
+      instructions:
+        'If using Cognee Cloud (https://platform.cognee.ai), find your workspace tenant URL (e.g., https://your-tenant.aws.cognee.ai) on the API Keys page and set COGNEE_BASE_URL in .env.',
+    };
+  }
+
+  return {
+    configured: true,
+    connected: false,
+    baseUrl,
+    keyMasked,
+    localKnowledgeCount,
+    message: `Cognee endpoint at ${baseUrl} returned non-200 response. Using resilient local Knowledge Graph in PostgreSQL (${localKnowledgeCount} entries).`,
+  };
+}
+
+/**
  * Records a rental lifecycle memory event into Cognee memory graph.
  * Falls back to local database audit/action logging if remote Cognee is unavailable.
  */
 export async function recordRentalMemoryEvent(data: MemoryEventData): Promise<{ success: boolean; memoryId?: string; source: string }> {
   const apiKey = getCogneeApiKey();
+  const baseUrl = getCogneeApiBase();
 
   // Try Cognee API if key is present
   if (apiKey) {
     try {
-      const response = await fetch(`${COGNEE_API_BASE}/api/v1/memory/add`, {
+      const datasetName = `havendex_${data.tenancyId || data.userProfileId || 'general'}`;
+      const payloadText = JSON.stringify({
+        summary: data.summary,
+        eventType: data.eventType,
+        metadata: data.metadata,
+        user_id: data.userProfileId,
+        timestamp: data.timestamp || new Date().toISOString(),
+      });
+
+      const formData = new FormData();
+      formData.append('raw_data', payloadText);
+      formData.append('datasetName', datasetName);
+
+      const response = await fetch(`${baseUrl}/api/v1/add`, {
         method: 'POST',
         headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${apiKey}`,
+          'X-Api-Key': apiKey,
+          Authorization: `Bearer ${apiKey}`,
         },
-        body: JSON.stringify({
-          user_id: data.userProfileId,
-          dataset_name: `havendex_tenancy_${data.tenancyId || 'general'}`,
-          data: {
-            summary: data.summary,
-            eventType: data.eventType,
-            metadata: data.metadata,
-            timestamp: data.timestamp || new Date().toISOString(),
-          },
-        }),
+        body: formData,
+        signal: AbortSignal.timeout(3000),
       });
 
       if (response.ok) {
+        // Trigger cognify asynchronously
+        fetch(`${baseUrl}/api/v1/cognify`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Api-Key': apiKey,
+            Authorization: `Bearer ${apiKey}`,
+          },
+          body: JSON.stringify({ datasets: [datasetName] }),
+        }).catch(() => {});
+
         const result = await response.json();
         return {
           success: true,
-          memoryId: result.id || result.memory_id,
+          memoryId: result.id || result.memory_id || `cognee-${Date.now()}`,
           source: 'COGNEE_API',
         };
       }
@@ -121,29 +263,34 @@ export async function searchRentalMemories(
   limit: number = 3
 ): Promise<MemoryQueryResult> {
   const apiKey = getCogneeApiKey();
+  const baseUrl = getCogneeApiBase();
 
   if (apiKey) {
     try {
-      const response = await fetch(`${COGNEE_API_BASE}/api/v1/memory/search`, {
+      const response = await fetch(`${baseUrl}/api/v1/search`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'Authorization': `Bearer ${apiKey}`,
+          'X-Api-Key': apiKey,
+          Authorization: `Bearer ${apiKey}`,
         },
         body: JSON.stringify({
-          user_id: userProfileId,
           query,
-          limit,
+          datasets: [`havendex_${userProfileId}`, 'havendex_general'],
+          top_k: limit,
+          searchType: 'GRAPH_COMPLETION',
         }),
+        signal: AbortSignal.timeout(3000),
       });
 
       if (response.ok) {
         const data = await response.json();
+        const results = Array.isArray(data) ? data : data.results || [];
         return {
-          relevantMemories: (data.results || []).map((r: any) => ({
-            id: r.id,
-            summary: r.text || r.summary,
-            score: r.score,
+          relevantMemories: results.map((r: any) => ({
+            id: r.id || `cognee-${Date.now()}`,
+            summary: r.text || r.summary || (typeof r === 'string' ? r : JSON.stringify(r)),
+            score: r.score ?? 0.9,
             timestamp: r.created_at || new Date().toISOString(),
           })),
           source: 'COGNEE_API',

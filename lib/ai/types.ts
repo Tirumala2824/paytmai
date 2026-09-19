@@ -88,6 +88,7 @@ export interface AIExecutionResponse {
     isRepeated: boolean;
   };
   isRepeatedIssue?: boolean;
+  ragEvaluation?: import('./rag/evaluator').RagEvaluationResult;
 }
 
 export interface AgentRentalContext {

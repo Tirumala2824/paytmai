@@ -276,6 +276,12 @@ CRITICAL ROLE RESTRICTIONS:
   "I can only help you with your personal tenancy details, rent payments, and maintenance requests."
 - Never expose private landlord financials or other tenants' data.`;
 
+  const ragResults = toolResults.searchKnowledgeBase?.output?.results;
+  const ragSection =
+    Array.isArray(ragResults) && ragResults.length > 0
+      ? `\nRetrieved Knowledge Base (RAG Grounding from Cognee/PostgreSQL Knowledge Graph):\n${ragResults.map((r: any) => `• [${r.category}] ${r.summary}`).join('\n')}\n`
+      : '';
+
   try {
     const prompt = `${roleInstructions}
 
@@ -286,7 +292,7 @@ User Role: ${userRole || 'TENANT'}
 
 Ground-truth domain service execution results:
 ${JSON.stringify(toolResults, null, 2)}
-
+${ragSection}
 Rental Context:
 ${JSON.stringify(context, null, 2)}
 
@@ -295,9 +301,10 @@ Instructions:
 2. Respect the role boundaries specified above.
 3. If multiple actions were executed, clearly report each one (e.g. Payment status confirmed, Maintenance issue created, Owner notified).
 4. If an action failed, report its actual failure honestly. Never claim both succeeded if one failed!
-5. Rely strictly on the ground-truth data from the tool results.
-6. Do not invent any numbers, dates, or false facts.
-7. Keep the response concise (2-4 sentences max).
+5. Rely strictly on the ground-truth data from the tool results and knowledge base.
+6. If the user asks about property rules, Wi-Fi credentials, mess/food timings, or amenities, provide the exact values retrieved from the knowledge base.
+7. Do not invent any numbers, dates, or false facts.
+8. Keep the response concise and clearly formatted.
 
 Response:`;
 

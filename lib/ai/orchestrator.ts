@@ -141,5 +141,6 @@ export async function executeRentalAssistant(
     pendingConfirmation: finalState.pendingConfirmation,
     previousRelatedIssue: finalState.context?.previousRelatedIssue,
     isRepeatedIssue: finalState.context?.isRepeatedIssue,
+    ragEvaluation: finalState.ragEvaluation,
   };
 }
