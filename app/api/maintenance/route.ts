@@ -62,6 +62,7 @@ export async function GET(request: NextRequest) {
         priority: i.priority,
         status: i.status,
         resolution: i.resolution,
+        imageUrl: i.imageUrl,
         isRepeated: i.isRepeated,
         createdAt: i.createdAt.toISOString(),
         updatedAt: i.updatedAt.toISOString(),
@@ -115,7 +116,7 @@ export async function GET(request: NextRequest) {
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
-    const { title, description, category, priority, tenancyId, isRepeated } = body;
+    const { title, description, category, priority, tenancyId, isRepeated, imageUrl } = body;
 
     if (!title || !description) {
       return NextResponse.json(
@@ -163,6 +164,7 @@ export async function POST(request: NextRequest) {
       priority: priority || 'MEDIUM',
       reporterUserProfileId: userProfile.id,
       isRepeated: isRepeated ?? false,
+      imageUrl: imageUrl || undefined,
     });
 
     return NextResponse.json({ success: true, issue });

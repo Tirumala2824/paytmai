@@ -52,6 +52,46 @@ export async function PATCH(request: NextRequest) {
         actor: { id: actor.id, role: actor.role },
         notes,
       });
+
+      // If status is FIXED, VERIFIED, or CLOSED, broadcast notification to ALL active tenants in property
+      if (['FIXED', 'VERIFIED', 'CLOSED'].includes(status)) {
+        try {
+          const issue = await prisma.maintenanceIssue.findUnique({
+            where: { id: issueId },
+            include: {
+              property: {
+                include: {
+                  tenancies: {
+                    where: { isActive: true },
+                    include: { tenant: { include: { userProfile: true } } },
+                  },
+                },
+              },
+            },
+          });
+
+          if (issue && issue.property?.tenancies) {
+            const notifs = issue.property.tenancies
+              .filter((t) => t.tenant?.userProfile?.id)
+              .map((t) => ({
+                userProfileId: t.tenant.userProfile.id,
+                title: `🔧 Issue Resolved: ${issue.title}`,
+                message: `The maintenance issue "${issue.title}" at ${issue.property.name} has been resolved (${status}). All systems are running normally.`,
+                type: 'MAINTENANCE_RESOLVED' as const,
+                link: '/maintenance',
+              }));
+
+            if (notifs.length > 0) {
+              await prisma.notification.createMany({
+                data: notifs,
+              });
+            }
+          }
+        } catch (notifErr) {
+          console.warn('Could not broadcast tenant notifications:', notifErr);
+        }
+      }
+
       return NextResponse.json({ success: true, issue: updated });
     }
 

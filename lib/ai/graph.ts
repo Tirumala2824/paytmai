@@ -1185,7 +1185,8 @@ export async function respondNode(state: AgentStateType): Promise<Partial<AgentS
     results,
     context,
     state.modelName,
-    detectedLanguage
+    detectedLanguage,
+    state.userProfile?.role
   );
 
   if (dynamicResponse) {

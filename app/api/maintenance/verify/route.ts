@@ -63,6 +63,44 @@ export async function POST(request: NextRequest) {
       actor: { id: actor.id, role: actor.role },
     });
 
+    if (confirmed) {
+      try {
+        const issue = await prisma.maintenanceIssue.findUnique({
+          where: { id: issueId },
+          include: {
+            property: {
+              include: {
+                tenancies: {
+                  where: { isActive: true },
+                  include: { tenant: { include: { userProfile: true } } },
+                },
+              },
+            },
+          },
+        });
+
+        if (issue && issue.property?.tenancies) {
+          const notifs = issue.property.tenancies
+            .filter((t) => t.tenant?.userProfile?.id)
+            .map((t) => ({
+              userProfileId: t.tenant.userProfile.id,
+              title: `✅ Maintenance Verified & Closed: ${issue.title}`,
+              message: `Maintenance issue "${issue.title}" at ${issue.property.name} has been verified and officially closed. Resolution: ${resolution || 'Completed'}.`,
+              type: 'MAINTENANCE_RESOLVED' as const,
+              link: '/maintenance',
+            }));
+
+          if (notifs.length > 0) {
+            await prisma.notification.createMany({
+              data: notifs,
+            });
+          }
+        }
+      } catch (notifErr) {
+        console.warn('Could not broadcast tenant notifications on verify:', notifErr);
+      }
+    }
+
     return NextResponse.json({
       success: true,
       result,
