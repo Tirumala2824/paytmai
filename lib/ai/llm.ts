@@ -238,7 +238,7 @@ Return strictly JSON array without markdown formatting.`;
 
 /**
  * Dynamically synthesizes natural language response using the configured Gemini model grounded in tool execution results.
- * Supports multilingual responses (Hindi, Indian English, etc.).
+ * Supports multilingual responses (Hindi, Indian English, etc.) and strict role isolation (TENANT vs OWNER).
  */
 export async function dynamicSynthesizeResponse(
   userMessage: string,
@@ -246,7 +246,8 @@ export async function dynamicSynthesizeResponse(
   toolResults: Record<string, any>,
   context: any,
   customModel?: string,
-  languageCode?: string
+  languageCode?: string,
+  userRole?: string
 ): Promise<string | null> {
   const model = getGeminiModel(0.3, customModel);
   if (!model) return null;
@@ -254,11 +255,26 @@ export async function dynamicSynthesizeResponse(
   const modelUsed = getGeminiModelName(customModel);
   const targetLanguage = languageCode && languageCode.startsWith('hi') ? 'Hindi (हिन्दी)' : 'English (Indian context)';
 
+  // Role-specific persona & boundary enforcement
+  const roleInstructions =
+    userRole === 'OWNER' || userRole === 'PROPERTY_MANAGER'
+      ? `You are HavenDex Manager, an executive property management AI copilot.
+You have full access to portfolio-level data: all tenancies, property revenue, rent collections, occupancy metrics, and cross-property maintenance triage.
+Provide strategic, concise operational insights for property management.`
+      : `You are Haven, a friendly and empathetic tenant AI companion for HavenDex.
+CRITICAL ROLE RESTRICTIONS:
+- You ONLY assist the tenant with their own rental details, their own rent schedule, their own maintenance issues, and their lease.
+- If the user asks about property revenue, other tenants' private details, occupancy rates, or owner-level portfolio financial metrics, politely decline:
+  "I can only help you with your personal tenancy details, rent payments, and maintenance requests."
+- Never expose private landlord financials or other tenants' data.`;
+
   try {
-    const prompt = `You are HavenDex, an AI rental assistant teammate.
+    const prompt = `${roleInstructions}
+
 The user asked: "${userMessage}"
-Intent(s): "${intent}"
+Detected Intent(s): "${intent}"
 Target Language: ${targetLanguage}
+User Role: ${userRole || 'TENANT'}
 
 Ground-truth domain service execution results:
 ${JSON.stringify(toolResults, null, 2)}
@@ -268,11 +284,12 @@ ${JSON.stringify(context, null, 2)}
 
 Instructions:
 1. Synthesize a warm, helpful, professional, concise response to the user in ${targetLanguage}.
-2. If multiple actions were executed, clearly report each one (e.g. Payment status confirmed, Maintenance issue created, Owner notified).
-3. If an action failed, report its actual failure honestly (e.g. "Payment: Confirmed, Maintenance: Could not create task"). Never claim both succeeded if one failed!
-4. Rely strictly on the ground-truth data from the tool results.
-5. Do not invent any numbers, dates, or false facts.
-6. Keep the response concise (2-4 sentences max).
+2. Respect the role boundaries specified above.
+3. If multiple actions were executed, clearly report each one (e.g. Payment status confirmed, Maintenance issue created, Owner notified).
+4. If an action failed, report its actual failure honestly. Never claim both succeeded if one failed!
+5. Rely strictly on the ground-truth data from the tool results.
+6. Do not invent any numbers, dates, or false facts.
+7. Keep the response concise (2-4 sentences max).
 
 Response:`;
 
@@ -284,4 +301,5 @@ Response:`;
   }
   return null;
 }
+
 

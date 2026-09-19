@@ -14,6 +14,7 @@ export interface ReportIssueParams {
   priority?: string;
   reporterUserProfileId: string;
   isRepeated?: boolean;
+  imageUrl?: string;
 }
 
 /**
@@ -93,6 +94,7 @@ export async function reportMaintenanceIssue(params: ReportIssueParams) {
       category: params.category || 'GENERAL',
       priority: params.priority || 'MEDIUM',
       status: MaintenanceStatus.ISSUE_REPORTED,
+      imageUrl: params.imageUrl || null,
       isRepeated: params.isRepeated ?? false,
     },
   });

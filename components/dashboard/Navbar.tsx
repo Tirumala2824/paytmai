@@ -3,10 +3,11 @@
 import React from 'react';
 import Link from 'next/link';
 import { useRouter, usePathname } from 'next/navigation';
-import { Bell, LogOut, Sparkles, Home, Building2, CreditCard, Wrench, User, History } from 'lucide-react';
+import { LogOut, Sparkles, Home, Building2, CreditCard, Wrench, User, History } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { UserRole } from '@prisma/client';
 import { cn } from '@/lib/utils';
+import { NotificationBell } from './NotificationBell';
 
 interface NavbarProps {
   userRole?: UserRole;
@@ -30,7 +31,7 @@ export function Navbar({
         { href: '/tenant', label: 'Home', icon: Home },
         { href: '/payments', label: 'Rent', icon: CreditCard },
         { href: '/maintenance', label: 'Issues', icon: Wrench },
-        { href: '/notifications', label: 'Updates', icon: Bell },
+        { href: '/notifications', label: 'Updates', icon: Sparkles },
       ]
     : [
         { href: '/assistant', label: 'Ask', icon: Sparkles },
@@ -63,18 +64,7 @@ export function Navbar({
 
         <div className="flex items-center gap-2">
           {/* Notifications */}
-          <Link
-            href="/notifications"
-            className="relative h-9 w-9 rounded-lg border border-slate-800 bg-slate-900/80 flex items-center justify-center text-slate-400 hover:text-white hover:border-slate-700 transition-colors"
-            aria-label="View notifications"
-          >
-            <Bell className="h-4 w-4" />
-            {unreadNotifications > 0 && (
-              <span className="absolute -top-1 -right-1 h-4 w-4 rounded-full bg-indigo-500 text-[10px] font-bold text-white flex items-center justify-center ring-2 ring-slate-950">
-                {unreadNotifications}
-              </span>
-            )}
-          </Link>
+          <NotificationBell />
 
           {/* Sign out */}
           <Button
@@ -100,18 +90,7 @@ export function Navbar({
         </div>
 
         <div className="flex items-center gap-2">
-          <Link
-            href="/notifications"
-            className="relative h-8 w-8 rounded-lg border border-slate-800 bg-slate-900/80 flex items-center justify-center text-slate-400"
-            aria-label="Notifications"
-          >
-            <Bell className="h-4 w-4" />
-            {unreadNotifications > 0 && (
-              <span className="absolute -top-1 -right-1 h-4 w-4 rounded-full bg-indigo-500 text-[10px] font-bold text-white flex items-center justify-center ring-2 ring-slate-950">
-                {unreadNotifications}
-              </span>
-            )}
-          </Link>
+          <NotificationBell />
         </div>
       </header>
 
