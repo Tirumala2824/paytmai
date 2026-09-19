@@ -34,6 +34,7 @@ export function Sidebar({
   const isTenant = userRole === UserRole.TENANT;
 
   const tenantLinks = [
+    { href: '/assistant', label: 'AI Assistant', icon: Sparkles },
     { href: '/tenant', label: 'Dashboard', icon: Home },
     { href: '/payments', label: 'Rent & Payments', icon: CreditCard },
     { href: '/maintenance', label: 'Maintenance', icon: Wrench },
@@ -42,6 +43,7 @@ export function Sidebar({
   ];
 
   const ownerLinks = [
+    { href: '/assistant', label: 'AI Assistant', icon: Sparkles },
     { href: '/owner', label: 'Portfolio Overview', icon: Home },
     { href: '/property', label: 'Properties & Rooms', icon: Building2 },
     { href: '/maintenance', label: 'Maintenance Board', icon: Wrench },
