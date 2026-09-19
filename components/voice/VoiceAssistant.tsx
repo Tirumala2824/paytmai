@@ -27,6 +27,7 @@ import {
 } from 'lucide-react';
 import { AIExecutionResponse, DetectedIntent, MultiIntentExecutionStatus } from '@/lib/ai/types';
 import { SUPPORTED_INDIAN_LANGUAGES } from '@/lib/voice/sarvam';
+import { LiveAgentTimeline } from './LiveAgentTimeline';
 
 export type VoiceState = 'Idle' | 'Listening' | 'Processing' | 'Executing' | 'Completed' | 'Error';
 
@@ -75,16 +76,18 @@ export function VoiceAssistant({
     };
   }, []);
 
+  const [isSimulatingFix, setIsSimulatingFix] = useState<boolean>(false);
+
   // Quick Multilingual Demonstration Scenarios
   const demoScenarios = [
     {
-      label: 'Phase 3 Canonical (English)',
+      label: 'Main Hackathon Demo (English)',
       lang: 'en-IN',
-      text: "My rent is paid, confirm it and tell the owner my AC isn't working.",
-      badge: 'Multi-Intent Canonical',
+      text: "My rent is paid. Please confirm it and tell the owner that my AC isn't working again.",
+      badge: 'Primary Canonical Demo',
     },
     {
-      label: 'Phase 3 Canonical (Hindi)',
+      label: 'Main Hackathon Demo (Hindi)',
       lang: 'hi-IN',
       text: 'मेरा किराया भर दिया है, पुष्टि करें और मालिक को बताएं कि मेरा एसी काम नहीं कर रहा है',
       badge: 'Multilingual हिन्दी',
@@ -654,6 +657,32 @@ export function VoiceAssistant({
                 </div>
               </div>
             )}
+
+            {/* Live 9-Stage Agent Execution Timeline */}
+            <div className="w-full">
+              <LiveAgentTimeline
+                onSimulateFixAndVerify={async () => {
+                  setIsSimulatingFix(true);
+                  try {
+                    await fetch('/api/maintenance/demo-step', {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({ step: 'STEP_2_FIX_AND_VERIFY' }),
+                    });
+                    // Re-run workflow to refresh context and memory
+                    await executeWorkflow(
+                      "My rent is paid. Please confirm it and tell the owner that my AC isn't working again.",
+                      selectedLanguage
+                    );
+                  } catch (e) {
+                    console.warn('Simulation error:', e);
+                  } finally {
+                    setIsSimulatingFix(false);
+                  }
+                }}
+                isSimulatingFix={isSimulatingFix}
+              />
+            </div>
           </div>
         )}
 

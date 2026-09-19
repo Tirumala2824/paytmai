@@ -233,18 +233,12 @@ export default function MaintenancePage() {
 
   return (
     <div className="space-y-6">
-      {/* Workspace Header */}
+      {/* Header */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
-          <div className="flex items-center gap-2">
-            <Badge className="bg-indigo-600/20 text-indigo-300 border-indigo-500/30 text-xs">
-              Closed-Loop Maintenance System
-            </Badge>
-            <span className="text-xs text-slate-400">Phase 4 Autonomous Verification</span>
-          </div>
-          <h1 className="text-2xl font-bold text-white mt-1">Maintenance &amp; Service Workspace</h1>
-          <p className="text-xs text-slate-400">
-            End-to-end issue lifecycle: Triage → Contractor Dispatch → Evidence → Multi-Source Verification → Closed
+          <h1 className="text-2xl font-bold text-white">Maintenance &amp; Repairs</h1>
+          <p className="text-xs text-slate-400 mt-0.5">
+            Report issues, track repairs, and confirm fixes
           </p>
         </div>
 
@@ -269,50 +263,50 @@ export default function MaintenancePage() {
         </div>
       </div>
 
-      {/* KPI Overview Strip */}
+      {/* Stats */}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
         <div className="p-4 rounded-xl bg-slate-900/70 border border-slate-800">
-          <span className="text-xs text-slate-400">Total Logged Issues</span>
+          <span className="text-xs text-slate-400">Total Issues</span>
           <p className="text-2xl font-bold text-white mt-1">{issues.length}</p>
-          <span className="text-[11px] text-indigo-400">Active rental properties</span>
+          <span className="text-[11px] text-indigo-400">In your rental</span>
         </div>
         <div className="p-4 rounded-xl bg-slate-900/70 border border-slate-800">
           <span className="text-xs text-amber-400 flex items-center gap-1">
-            <AlertTriangle className="h-3.5 w-3.5" /> Urgent / High
+            <AlertTriangle className="h-3.5 w-3.5" /> Urgent
           </span>
           <p className="text-2xl font-bold text-amber-300 mt-1">{urgentCount}</p>
-          <span className="text-[11px] text-slate-400">Escalated to owners</span>
+          <span className="text-[11px] text-slate-400">Needs attention</span>
         </div>
         <div className="p-4 rounded-xl bg-slate-900/70 border border-slate-800">
           <span className="text-xs text-sky-400 flex items-center gap-1">
             <Clock className="h-3.5 w-3.5" /> In Progress
           </span>
           <p className="text-2xl font-bold text-sky-300 mt-1">{inProgressCount}</p>
-          <span className="text-[11px] text-slate-400">Contractor dispatched</span>
+          <span className="text-[11px] text-slate-400">Repair underway</span>
         </div>
         <div className="p-4 rounded-xl bg-slate-900/70 border border-slate-800">
           <span className="text-xs text-emerald-400 flex items-center gap-1">
-            <ShieldCheck className="h-3.5 w-3.5" /> Verification Pending
+            <ShieldCheck className="h-3.5 w-3.5" /> Needs Confirmation
           </span>
           <p className="text-2xl font-bold text-emerald-300 mt-1">{pendingVerifyCount}</p>
-          <span className="text-[11px] text-slate-400">Requires proof / sign-off</span>
+          <span className="text-[11px] text-slate-400">Awaiting your sign-off</span>
         </div>
       </div>
 
       {/* Filter Tabs */}
-      <div className="flex items-center gap-2 overflow-x-auto pb-2 border-b border-slate-800 text-xs">
+      <div className="flex items-center gap-2 overflow-x-auto pb-2 border-b border-slate-800 text-xs no-scrollbar">
         {[
-          { key: 'ALL', label: 'All Issues' },
-          { key: 'OPEN', label: 'Open & Active' },
+          { key: 'ALL', label: 'All' },
+          { key: 'OPEN', label: 'Open' },
           { key: 'IN_PROGRESS', label: 'In Progress' },
-          { key: 'VERIFICATION_PENDING', label: 'Verification Pending' },
-          { key: 'RESOLVED', label: 'Resolved / Closed' },
-          { key: 'REPEATED', label: `Repeated Issues (${repeatedCount})` },
+          { key: 'VERIFICATION_PENDING', label: 'Awaiting Confirmation' },
+          { key: 'RESOLVED', label: 'Resolved' },
+          { key: 'REPEATED', label: `Recurring (${repeatedCount})` },
         ].map((tab) => (
           <button
             key={tab.key}
             onClick={() => setFilter(tab.key)}
-            className={`px-3 py-1.5 rounded-lg font-medium transition-all ${
+            className={`px-3 py-1.5 rounded-lg font-medium transition-all shrink-0 ${
               filter === tab.key
                 ? 'bg-indigo-600 text-white shadow-sm shadow-indigo-600/30'
                 : 'text-slate-400 hover:text-white hover:bg-slate-900'
@@ -327,11 +321,13 @@ export default function MaintenancePage() {
       {loading ? (
         <div className="p-12 text-center text-slate-400 text-xs flex flex-col items-center justify-center gap-2">
           <RefreshCw className="h-5 w-5 animate-spin text-indigo-400" />
-          <span>Loading maintenance workspace...</span>
+          <span>Loading your issues...</span>
         </div>
       ) : filteredIssues.length === 0 ? (
-        <div className="p-12 rounded-2xl bg-slate-900/40 border border-slate-800 text-center text-slate-400 text-xs">
-          No maintenance issues found for this filter.
+        <div className="p-12 rounded-2xl bg-slate-900/40 border border-slate-800 text-center space-y-2">
+          <CheckCircle2 className="h-8 w-8 text-emerald-400 mx-auto" />
+          <p className="text-sm font-semibold text-white">All clear!</p>
+          <p className="text-xs text-slate-400">No issues found here. Your room looks good.</p>
         </div>
       ) : (
         <div className="space-y-4">
@@ -391,11 +387,11 @@ export default function MaintenancePage() {
                     <p className="text-xs text-slate-300 mt-1 leading-relaxed">{issue.description}</p>
                   </div>
 
-                  {/* Visual Lifecycle Stepper: Reported -> Assigned -> In Progress -> Fixed -> Verification -> Verified */}
+                  {/* Visual Lifecycle Stepper */}
                   <div className="p-3 rounded-xl bg-slate-950/60 border border-slate-800/80">
                     <div className="flex items-center justify-between text-[11px] mb-2 font-medium text-slate-400">
-                      <span>Closed-Loop Resolution Lifecycle</span>
-                      <span className="text-indigo-400 font-semibold">{issue.status}</span>
+                      <span>Repair Progress</span>
+                      <span className="text-indigo-400 font-semibold capitalize">{issue.status.toLowerCase().replace(/_/g, ' ')}</span>
                     </div>
 
                     <div className="grid grid-cols-6 gap-1 sm:gap-2">
@@ -433,10 +429,10 @@ export default function MaintenancePage() {
 
                   {/* Detailed Specs Grid: Assigned To, Timeline, Evidence, Verification, Resolution */}
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
-                    {/* Contractor & Task Details */}
+                    {/* Contractor details */}
                     <div className="p-3 rounded-xl bg-slate-950/40 border border-slate-800/60 space-y-1.5">
                       <span className="text-[10px] uppercase font-bold text-slate-400 tracking-wider">
-                        Contractor Assignment
+                        Repair Person
                       </span>
                       {latestTask ? (
                         <div>
@@ -458,10 +454,10 @@ export default function MaintenancePage() {
                       )}
                     </div>
 
-                    {/* Verification Record & Evidence */}
+                    {/* Verification */}
                     <div className="p-3 rounded-xl bg-slate-950/40 border border-slate-800/60 space-y-1.5">
                       <span className="text-[10px] uppercase font-bold text-slate-400 tracking-wider">
-                        Verification &amp; Evidence
+                        Verification
                       </span>
                       {latestVerification ? (
                         <div className="space-y-1">
@@ -487,13 +483,13 @@ export default function MaintenancePage() {
                     </div>
                   </div>
 
-                  {/* Resolution Details (if available) */}
+                  {/* Resolution */}
                   {issue.resolution && (
                     <div className="p-3 rounded-xl bg-emerald-950/20 border border-emerald-900/40 text-xs flex items-start gap-2">
                       <CheckCircle2 className="h-4 w-4 text-emerald-400 shrink-0 mt-0.5" />
                       <div>
                         <span className="text-[10px] uppercase font-bold text-emerald-300 tracking-wider">
-                          Documented Resolution
+                          How it was fixed
                         </span>
                         <p className="text-emerald-100 text-[11px] mt-0.5">{issue.resolution}</p>
                       </div>
@@ -503,7 +499,7 @@ export default function MaintenancePage() {
                   {/* Action Bar */}
                   <div className="flex items-center justify-between pt-2 border-t border-slate-800/80">
                     <div className="text-[11px] text-slate-500">
-                      Reporter: {issue.reportedBy.name} ({issue.reportedBy.email})
+                      Reported by {issue.reportedBy.name}
                     </div>
 
                     <div className="flex items-center gap-2">
@@ -516,8 +512,8 @@ export default function MaintenancePage() {
                           }}
                           className="text-xs h-8 gap-1 bg-emerald-600 hover:bg-emerald-500 shadow-sm shadow-emerald-600/20"
                         >
-                          <ShieldCheck className="h-3.5 w-3.5" />
-                          Verify &amp; Close Issue
+                          <CheckCircle2 className="h-3.5 w-3.5" />
+                          Confirm It&apos;s Fixed
                         </Button>
                       )}
                     </div>
@@ -536,8 +532,8 @@ export default function MaintenancePage() {
             <CardHeader className="pb-3">
               <div className="flex items-center justify-between">
                 <CardTitle className="text-base text-white flex items-center gap-2">
-                  <ShieldCheck className="h-5 w-5 text-emerald-400" />
-                  Closed-Loop Verification
+                  <CheckCircle2 className="h-5 w-5 text-emerald-400" />
+                  Confirm the Repair is Done
                 </CardTitle>
                 <Button
                   variant="ghost"
@@ -556,23 +552,23 @@ export default function MaintenancePage() {
             <CardContent className="space-y-4 text-xs">
               {/* Verification Source Selection */}
               <div className="space-y-1.5">
-                <Label className="text-xs text-slate-300">Verification Source</Label>
+                <Label className="text-xs text-slate-300">How was it verified?</Label>
                 <select
                   value={verifyMethod}
                   onChange={(e) => setVerifyMethod(e.target.value as VerificationMethod)}
                   className="flex h-9 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-1.5 text-xs text-slate-100 focus:outline-none focus:border-indigo-500 font-medium"
                 >
                   <option value={VerificationMethod.TENANT_CONFIRMATION}>
-                    TENANT_CONFIRMATION (Tenant confirms via Portal)
+                    I personally confirmed the repair
                   </option>
                   <option value={VerificationMethod.OWNER_CONFIRMATION}>
-                    OWNER_CONFIRMATION (Property Owner physical check)
+                    Owner/manager physically checked
                   </option>
                   <option value={VerificationMethod.AI_IMAGE_ANALYSIS}>
-                    AI_IMAGE_ANALYSIS (Computer Vision inspection of repair photo)
+                    AI analysed a repair photo
                   </option>
                   <option value={VerificationMethod.COMBINED}>
-                    COMBINED (Tenant sign-off + AI Image Analysis)
+                    I confirmed + AI checked the photo
                   </option>
                 </select>
                 <span className="text-[10px] text-slate-500">
@@ -608,11 +604,10 @@ export default function MaintenancePage() {
                 </div>
               )}
 
-              {/* Evidence description */}
               <div className="space-y-1.5">
-                <Label className="text-xs text-slate-300">Evidence / Diagnostic Proof</Label>
+                <Label className="text-xs text-slate-300">What proof do you have?</Label>
                 <Input
-                  placeholder="e.g. Tenant confirmed cooling restored to 18°C. Invoice #CC-9021 attached."
+                  placeholder="e.g. I tested the AC, it's cooling at 18°C. Invoice #CC-9021 attached."
                   value={verifyEvidence}
                   onChange={(e) => setVerifyEvidence(e.target.value)}
                 />
@@ -620,19 +615,19 @@ export default function MaintenancePage() {
 
               {/* Resolution description */}
               <div className="space-y-1.5">
-                <Label className="text-xs text-slate-300">Resolution Description</Label>
+                <Label className="text-xs text-slate-300">How was it fixed?</Label>
                 <Input
-                  placeholder="e.g. AC service completed: filter cleaned, gas pressure restored."
+                  placeholder="e.g. AC serviced: filter cleaned, gas recharged."
                   value={verifyResolution}
                   onChange={(e) => setVerifyResolution(e.target.value)}
                 />
               </div>
 
-              {/* Inspector Notes */}
+              {/* Notes */}
               <div className="space-y-1.5">
-                <Label className="text-xs text-slate-300">Inspector / Verifier Notes</Label>
+                <Label className="text-xs text-slate-300">Any additional notes?</Label>
                 <Input
-                  placeholder="Additional observations, warranty info, etc."
+                  placeholder="Optional: warranty info, follow-up needed, etc."
                   value={verifyNotes}
                   onChange={(e) => setVerifyNotes(e.target.value)}
                 />
@@ -648,7 +643,7 @@ export default function MaintenancePage() {
                   className="text-xs text-rose-400 hover:bg-rose-500/10"
                 >
                   <X className="h-3.5 w-3.5 mr-1" />
-                  Reject (Reopen)
+                  It&apos;s still broken
                 </Button>
 
                 <Button
@@ -659,7 +654,7 @@ export default function MaintenancePage() {
                   className="text-xs bg-emerald-600 hover:bg-emerald-500"
                 >
                   <Check className="h-3.5 w-3.5 mr-1" />
-                  {isSubmittingVerify ? 'Submitting...' : 'Confirm Verification & Close'}
+                  {isSubmittingVerify ? 'Saving...' : 'Yes, it\'s fixed!'}
                 </Button>
               </div>
             </CardContent>
@@ -675,7 +670,7 @@ export default function MaintenancePage() {
               <div className="flex items-center justify-between">
                 <CardTitle className="text-base text-white flex items-center gap-2">
                   <Wrench className="h-5 w-5 text-indigo-400" />
-                  Log Maintenance Request
+                  Report a Problem
                 </CardTitle>
                 <Button
                   variant="ghost"
@@ -687,7 +682,7 @@ export default function MaintenancePage() {
                 </Button>
               </div>
               <CardDescription className="text-xs text-slate-400">
-                Autonomous classification, contractor dispatch, and owner notification
+                Describe what&apos;s broken or not working — we&apos;ll handle the rest.
               </CardDescription>
             </CardHeader>
 
@@ -752,7 +747,7 @@ export default function MaintenancePage() {
                     className="rounded border-slate-700 bg-slate-950 text-indigo-600 focus:ring-indigo-500"
                   />
                   <label htmlFor="isRepeatedCheck" className="text-slate-300 text-xs cursor-pointer">
-                    Flag as Repeated / Recurring Issue
+                    This has happened before
                   </label>
                 </div>
 
