@@ -273,4 +273,72 @@ describe('HavenDex Phase 4 - Persistent Rental Context & Closed-Loop Maintenance
       expect(memoryStep).toBeDefined();
     });
   });
+
+  // ==========================================================================
+  // 5. AGENTIC RAG SYSTEM & SEMANTIC KNOWLEDGE GRAPH RETRIEVAL
+  // ==========================================================================
+  describe('5. Agentic RAG System & Semantic Knowledge Graph Retrieval', () => {
+    it('should searchKnowledgeGraph() for Wi-Fi credentials and return SSID/password', async () => {
+      const results = await memoryService.searchKnowledgeGraph({
+        query: 'What is the wifi password and network name?',
+        userProfileId: testUserProfile.id,
+        limit: 5,
+      });
+
+      expect(Array.isArray(results)).toBe(true);
+      expect(results.length).toBeGreaterThan(0);
+      const wifiMatch = results.find((r) => r.category === 'PROPERTY_WIFI' || r.summary.toLowerCase().includes('wifi'));
+      expect(wifiMatch).toBeDefined();
+      expect(wifiMatch?.summary.toLowerCase()).toMatch(/wifi|password|ssid/);
+    });
+
+    it('should searchKnowledgeGraph() for mess timings and meal schedule', async () => {
+      const results = await memoryService.searchKnowledgeGraph({
+        query: 'What are the mess and food timings for breakfast and dinner?',
+        userProfileId: testUserProfile.id,
+        limit: 5,
+      });
+
+      expect(Array.isArray(results)).toBe(true);
+      expect(results.length).toBeGreaterThan(0);
+      const messMatch = results.find((r) => r.category === 'MESS_SCHEDULE' || r.summary.toLowerCase().includes('mess'));
+      expect(messMatch).toBeDefined();
+      expect(messMatch?.summary.toLowerCase()).toMatch(/breakfast|dinner|lunch|mess/);
+    });
+
+    it('should searchKnowledgeGraph() for property rules, gate timings and visitor policy', async () => {
+      const results = await memoryService.searchKnowledgeGraph({
+        query: 'What are the gate closing timings and visitor rules?',
+        userProfileId: testUserProfile.id,
+        limit: 5,
+      });
+
+      expect(Array.isArray(results)).toBe(true);
+      expect(results.length).toBeGreaterThan(0);
+      const rulesMatch = results.find((r) => r.category === 'PROPERTY_RULES' || r.summary.toLowerCase().includes('gate'));
+      expect(rulesMatch).toBeDefined();
+      expect(rulesMatch?.summary.toLowerCase()).toMatch(/gate|visitor|guest|curfew|rules/);
+    });
+
+    it('should executeRentalAssistant() with RAG tool planning for "What are the mess timings?"', async () => {
+      const response = await executeRentalAssistant({
+        userMessage: 'What are the mess timings?',
+        userProfile: testUserProfile,
+      });
+
+      expect(response.plannedActions).toContain('searchKnowledgeBase');
+      expect(response.userResponse.toLowerCase()).toMatch(/mess|breakfast|dinner|lunch|schedule/);
+      expect(response.executionSteps.some((s) => s.label.includes('Knowledge graph') || s.label.includes('searchKnowledgeBase'))).toBe(true);
+    });
+
+    it('should executeRentalAssistant() with RAG tool planning for "What is the wifi password?"', async () => {
+      const response = await executeRentalAssistant({
+        userMessage: 'What is the wifi password?',
+        userProfile: testUserProfile,
+      });
+
+      expect(response.plannedActions).toContain('searchKnowledgeBase');
+      expect(response.userResponse.toLowerCase()).toMatch(/wifi|password|internet|ssid/);
+    });
+  });
 });

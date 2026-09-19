@@ -64,6 +64,7 @@ vi.mock('@/lib/ai/llm', () => ({
   dynamicAnalyzeMultiIntents: vi.fn().mockResolvedValue(null),
   dynamicPlanTools: vi.fn().mockResolvedValue(null),
   dynamicSynthesizeResponse: vi.fn().mockResolvedValue(null),
+  generateContextualFollowUps: vi.fn().mockReturnValue(['Can I get a receipt?', 'When is my next due date?']),
 }));
 
 describe('AI Orchestrator Phase 2 Success Criteria Tests', () => {

@@ -1,10 +1,11 @@
 import prisma from '@/lib/db';
 import { UserProfile } from '@prisma/client';
 import { buildRentalAssistantGraph } from './graph';
-import { AIExecutionResponse } from './types';
+import { AIExecutionResponse, ChatTurn } from './types';
 import { createAuditEvent } from '@/lib/audit/service';
 import { getGeminiModelName } from './llm';
 import { sarvamTextToSpeech } from '@/lib/voice/sarvam';
+import { kcache } from './cache/kcache';
 
 export interface ExecuteAssistantParams {
   userMessage: string;
@@ -14,6 +15,7 @@ export interface ExecuteAssistantParams {
   languageCode?: string;
   generateAudio?: boolean;
   confirmedAction?: boolean;
+  history?: ChatTurn[];
 }
 
 /**
@@ -49,9 +51,15 @@ export async function executeRentalAssistant(
     });
   }
 
+  // 2. Load conversation history from KCache or caller parameters
+  let conversationHistory: ChatTurn[] = params.history || [];
+  if (conversationHistory.length === 0 && session.id) {
+    conversationHistory = kcache.getHistory(session.id, 10);
+  }
+
   const effectiveModel = getGeminiModelName(modelName);
 
-  // 2. Build and execute stateful 10-node LangGraph pipeline
+  // 3. Build and execute stateful 10-node LangGraph pipeline
   const graph = buildRentalAssistantGraph();
 
   const initialState = {
@@ -71,6 +79,7 @@ export async function executeRentalAssistant(
         email: userProfile.email,
         role: userProfile.role,
       },
+      conversationHistory,
     },
     plannedActions: [],
     authorizedActions: [],
@@ -84,11 +93,59 @@ export async function executeRentalAssistant(
     confirmedAction,
     nextState: undefined,
     userResponse: '',
+    conversationHistory,
+    suggestedFollowUps: [],
   };
 
   const finalState = await graph.invoke(initialState);
 
-  // 3. Record overall AuditEvent for this assistant interaction
+  // 4. Update KCache with this conversation turn and active entities
+  kcache.appendTurn(session.id, {
+    role: 'user',
+    content: userMessage,
+    timestamp: new Date().toISOString(),
+  });
+
+  if (finalState.userResponse) {
+    kcache.appendTurn(session.id, {
+      role: 'assistant',
+      content: finalState.userResponse,
+      intent: finalState.intent,
+      suggestedFollowUps: finalState.suggestedFollowUps,
+      timestamp: new Date().toISOString(),
+    });
+  }
+
+  // Infer and persist active session topic and entities in KCache
+  const lowerMsg = userMessage.toLowerCase();
+  let activeTopic: string | undefined = undefined;
+  let activeAppliance: string | undefined = undefined;
+  if (lowerMsg.includes('wifi') || lowerMsg.includes('wi-fi') || lowerMsg.includes('password') || lowerMsg.includes('internet')) {
+    activeTopic = 'WIFI';
+  } else if (lowerMsg.includes('mess') || lowerMsg.includes('food') || lowerMsg.includes('dinner') || lowerMsg.includes('lunch')) {
+    activeTopic = 'MESS_TIMINGS';
+  } else if (lowerMsg.includes('ac') || lowerMsg.includes('cooling')) {
+    activeTopic = 'AC_MAINTENANCE';
+    activeAppliance = 'AC';
+  } else if (lowerMsg.includes('geyser') || lowerMsg.includes('water') || lowerMsg.includes('heater')) {
+    activeTopic = 'GEYSER_MAINTENANCE';
+    activeAppliance = 'Geyser';
+  } else if (lowerMsg.includes('rent') || lowerMsg.includes('pay')) {
+    activeTopic = 'RENT_PAYMENT';
+  }
+
+  const createdIssueId = finalState.results?.createMaintenanceIssue?.output?.issueId;
+  kcache.updateActiveContext(session.id, {
+    activePropertyId: finalState.context?.tenancy?.propertyId,
+    activePropertyName: finalState.context?.tenancy?.propertyName,
+    activeRoomNumber: finalState.context?.tenancy?.roomNumber,
+    activeIssueId: createdIssueId || kcache.getActiveContext(session.id)?.activeIssueId,
+    activeTopic: activeTopic || kcache.getActiveContext(session.id)?.activeTopic,
+    activeAppliance: activeAppliance || kcache.getActiveContext(session.id)?.activeAppliance,
+    lastIntent: finalState.intent,
+  });
+
+  // 5. Record overall AuditEvent for this assistant interaction
   await createAuditEvent({
     actorId: userProfile.id,
     actorRole: userProfile.role,
@@ -105,7 +162,7 @@ export async function executeRentalAssistant(
     },
   });
 
-  // 4. Optionally generate audio using Sarvam TTS
+  // 6. Optionally generate audio using Sarvam TTS
   let audioBase64: string | undefined = undefined;
   if (generateAudio && finalState.userResponse) {
     try {
@@ -121,7 +178,7 @@ export async function executeRentalAssistant(
     }
   }
 
-  // 5. Return structured output (no chain-of-thought exposed)
+  // 7. Return structured output with suggested follow-ups and history
   return {
     sessionId: session.id,
     intent: finalState.intent,
@@ -141,5 +198,8 @@ export async function executeRentalAssistant(
     pendingConfirmation: finalState.pendingConfirmation,
     previousRelatedIssue: finalState.context?.previousRelatedIssue,
     isRepeatedIssue: finalState.context?.isRepeatedIssue,
+    ragEvaluation: finalState.ragEvaluation,
+    suggestedFollowUps: finalState.suggestedFollowUps || [],
+    conversationHistory: kcache.getHistory(session.id, 10),
   };
 }

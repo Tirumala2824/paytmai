@@ -9,7 +9,7 @@ export const dynamic = 'force-dynamic';
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
-    const { message, sessionId, modelName, languageCode, generateAudio, confirmedAction, userRole } = body;
+    const { message, sessionId, modelName, languageCode, generateAudio, confirmedAction, userRole, history } = body;
 
     if (!message || typeof message !== 'string') {
       return NextResponse.json(
@@ -54,6 +54,7 @@ export async function POST(req: NextRequest) {
       languageCode,
       generateAudio,
       confirmedAction,
+      history,
     });
 
     return NextResponse.json(response);

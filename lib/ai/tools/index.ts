@@ -5,6 +5,7 @@ import { canAccessProperty, canAccessTenancy, canAccessMaintenanceIssue, canAcce
 import { getTenancyWithDetails } from '@/lib/rental/service';
 import { reportMaintenanceIssue, assignMaintenanceTask, updateMaintenanceStatus, verifyMaintenanceIssue } from '@/lib/maintenance/service';
 import { createAuditEvent } from '@/lib/audit/service';
+import { memoryService } from '@/lib/ai/memory/service';
 import { ToolExecutionContext, ToolCallResult } from '../types';
 
 /**
@@ -1353,10 +1354,72 @@ export async function executeGetOwnerMaintenanceOverview(
   }
 }
 
+export const searchKnowledgeBaseSchema = z.object({
+  query: z.string().describe('The search query for property rules, mess timings, Wi-Fi credentials, amenities, facilities, or policies'),
+  propertyName: z.string().optional().describe('Optional property name (e.g. Nexus Grand, CyberCity, Deccan Comfort)'),
+  category: z.string().optional().describe('Optional category: WIFI, MESS, RULES, FACILITY, APPLIANCE, or ALL'),
+  propertyId: z.string().optional().describe('Optional target property ID'),
+});
+
+export async function executeSearchKnowledgeBase(
+  input: z.infer<typeof searchKnowledgeBaseSchema>,
+  context: ToolExecutionContext
+): Promise<ToolCallResult> {
+  const toolName = 'searchKnowledgeBase';
+  try {
+    const { userProfile, activeTenancyId } = context;
+
+    let targetPropId = input.propertyId;
+    if (!targetPropId && userProfile.role === UserRole.TENANT && activeTenancyId) {
+      const ten = await prisma.tenancy.findUnique({
+        where: { id: activeTenancyId },
+        select: { propertyId: true },
+      });
+      if (ten) targetPropId = ten.propertyId;
+    }
+
+    const results = await memoryService.searchKnowledgeGraph({
+      query: input.query,
+      propertyName: input.propertyName,
+      propertyId: targetPropId,
+      userProfileId: userProfile.id,
+      category: input.category,
+      limit: 8,
+    });
+
+    const output = {
+      count: results.length,
+      query: input.query,
+      results,
+    };
+
+    await logAgentAction(context.sessionId, 'RAG_QUERY', toolName, input, output, 'EXECUTED');
+
+    const topSummaries = results.slice(0, 3).map((r) => r.summary).join(' | ');
+    return {
+      toolName,
+      status: 'SUCCESS',
+      input,
+      output,
+      summary: results.length > 0
+        ? `Retrieved ${results.length} relevant knowledge records: ${topSummaries}`
+        : `No specific knowledge records found for "${input.query}".`,
+    };
+  } catch (err: any) {
+    await logAgentAction(context.sessionId, 'RAG_QUERY', toolName, input, { error: err.message }, 'FAILED');
+    return { toolName, status: 'FAILED', input, output: {}, error: err.message };
+  }
+}
+
 // ============================================================================
 // Registry of All Typed Tools
 // ============================================================================
 export const AI_TOOLS_REGISTRY = {
+  searchKnowledgeBase: {
+    schema: searchKnowledgeBaseSchema,
+    execute: executeSearchKnowledgeBase,
+    description: 'Search the semantic rental knowledge graph for Wi-Fi passwords, mess/food timings, gate rules, visitor policies, amenities, and facility specs',
+  },
   getTenantProfile: {
     schema: getTenantProfileSchema,
     execute: executeGetTenantProfile,
