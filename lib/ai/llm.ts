@@ -86,6 +86,10 @@ Analyze the user's message and return ONLY a valid JSON object with:
   - "OWNER_NOTIFICATION" (asking to tell or notify the owner)
   - "PROPERTY_INFORMATION" (asking about building, amenities, rules)
   - "RENTAL_INFORMATION" (asking about tenancy, room, contract)
+  - "PORTFOLIO_OVERVIEW" (asking about owner portfolio, total revenue, rent collection, occupancy statistics)
+  - "TENANT_LIST" (asking for list/roster of all tenants across properties)
+  - "VACANCY_STATUS" (asking about vacant/occupied rooms and occupancy rate)
+  - "OWNER_MAINTENANCE_OVERVIEW" (asking for cross-property maintenance tickets and resolution status)
   - "GENERAL_RENTAL_ASSISTANCE" (general questions, greetings)
 - "entities": object with extracted details:
   - "category": (e.g. "APPLIANCE", "PLUMBING", "ELECTRICAL", "GENERAL")
@@ -151,6 +155,10 @@ Possible intent values:
 - "MAINTENANCE_REPORT": reporting broken items, leaks, AC issues, repair needs
 - "MAINTENANCE_STATUS": inquiring about status of existing maintenance issues
 - "OWNER_NOTIFICATION": explicitly requesting to inform/notify/tell the property owner
+- "PORTFOLIO_OVERVIEW": asking about owner portfolio, total revenue, rent collections, overall metrics
+- "TENANT_LIST": asking for roster of active tenants across properties
+- "VACANCY_STATUS": asking about vacant rooms, available units, occupancy rates
+- "OWNER_MAINTENANCE_OVERVIEW": asking about all maintenance tickets across properties
 - "PROPERTY_INFORMATION": asking about property amenities, address, rules
 - "RENTAL_INFORMATION": asking about lease, room, tenancy contract
 - "GENERAL_RENTAL_ASSISTANCE": greetings or general inquiries

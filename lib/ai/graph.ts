@@ -117,6 +117,7 @@ export async function loadContextNode(state: AgentStateType): Promise<Partial<Ag
   let tenancyRecord: any = null;
   let rentScheduleRecord: any = null;
   let maintenanceRecords: any[] = [];
+  let portfolioSummary: any = null;
 
   try {
     if (userProfile.role === UserRole.TENANT) {
@@ -154,33 +155,95 @@ export async function loadContextNode(state: AgentStateType): Promise<Partial<Ag
         rentScheduleRecord = tenancyRecord.rentSchedules[0] || null;
         maintenanceRecords = tenancyRecord.maintenanceIssues || [];
       }
-    } else if (userProfile.role === UserRole.OWNER) {
+    } else if (userProfile.role === UserRole.OWNER || userProfile.role === UserRole.ADMIN) {
       const owner = await prisma.owner.findUnique({
         where: { userProfileId: userProfile.id },
         include: {
           properties: {
             include: {
+              rooms: true,
               tenancies: {
                 where: { isActive: true },
-                take: 1,
                 include: {
                   room: true,
                   tenant: { include: { userProfile: true } },
                   rentSchedules: { orderBy: { dueDate: 'desc' }, take: 1 },
                 },
               },
+              maintenanceIssues: {
+                orderBy: { createdAt: 'desc' },
+                take: 10,
+              },
             },
           },
         },
       });
 
-      const firstProp = owner?.properties[0];
-      if (firstProp && firstProp.tenancies.length > 0) {
-        tenancyRecord = {
-          ...firstProp.tenancies[0],
-          property: firstProp,
+      if (owner && owner.properties.length > 0) {
+        let totalRooms = 0;
+        let occupiedRooms = 0;
+        let expectedMonthlyRent = 0;
+        let collectedRent = 0;
+        let pendingRent = 0;
+        let activeMaintenanceCount = 0;
+
+        const propertiesSummary = owner.properties.map((p) => {
+          const pRooms = p.rooms.length;
+          const pOccupied = p.rooms.filter((r) => r.isOccupied).length;
+          totalRooms += pRooms;
+          occupiedRooms += pOccupied;
+
+          p.tenancies.forEach((t) => {
+            expectedMonthlyRent += t.monthlyRent;
+            const rs = t.rentSchedules[0];
+            if (rs) {
+              if (rs.status === 'SUCCESS') {
+                collectedRent += rs.amount;
+              } else {
+                pendingRent += rs.amount;
+              }
+            }
+          });
+
+          const pActiveIssues = p.maintenanceIssues.filter(
+            (m) => !['RESOLVED', 'CLOSED'].includes(m.status)
+          ).length;
+          activeMaintenanceCount += pActiveIssues;
+
+          return {
+            id: p.id,
+            name: p.name,
+            address: `${p.address}, ${p.city}`,
+            totalRooms: pRooms,
+            occupiedRooms: pOccupied,
+            occupancyRate: pRooms > 0 ? Math.round((pOccupied / pRooms) * 100) : 0,
+          };
+        });
+
+        const vacantRooms = Math.max(0, totalRooms - occupiedRooms);
+        const occupancyRate = totalRooms > 0 ? Math.round((occupiedRooms / totalRooms) * 100) : 0;
+
+        portfolioSummary = {
+          totalProperties: owner.properties.length,
+          totalRooms,
+          occupiedRooms,
+          vacantRooms,
+          occupancyRate,
+          expectedMonthlyRent,
+          collectedRent,
+          pendingRent,
+          activeMaintenanceCount,
+          propertiesSummary,
         };
-        rentScheduleRecord = tenancyRecord.rentSchedules[0] || null;
+
+        const firstProp = owner.properties[0];
+        if (firstProp && firstProp.tenancies.length > 0) {
+          tenancyRecord = {
+            ...firstProp.tenancies[0],
+            property: firstProp,
+          };
+          rentScheduleRecord = tenancyRecord.rentSchedules[0] || null;
+        }
       }
     }
   } catch (err) {
@@ -243,17 +306,24 @@ export async function loadContextNode(state: AgentStateType): Promise<Partial<Ag
     relevantMemories: memoryContextResult?.relevantMemories || [],
     previousRelatedIssue: prevIssue,
     isRepeatedIssue: hasPreviousIssue,
+    portfolio: portfolioSummary,
   };
 
-  const stepDetails = prevIssue
+  const stepDetails = portfolioSummary
+    ? `Owner portfolio loaded: ${portfolioSummary.totalProperties} properties, ${portfolioSummary.totalRooms} rooms (${portfolioSummary.occupancyRate}% occupancy)`
+    : prevIssue
     ? `Previous related maintenance issue found: "${prevIssue.title}" (${prevIssue.status}: ${prevIssue.resolution || 'Service completed'})`
     : context.tenancy
     ? `Active lease at ${context.tenancy.propertyName} (Room ${context.tenancy.roomNumber})`
-    : 'No active lease loaded';
+    : 'Rental context loaded';
 
   const step: ExecutionStep = {
     id: `step-context-${Date.now()}`,
-    label: prevIssue ? 'Previous related maintenance issue found' : 'Rental context loaded',
+    label: portfolioSummary
+      ? 'Owner portfolio context loaded'
+      : prevIssue
+      ? 'Previous related maintenance issue found'
+      : 'Rental context loaded',
     status: 'completed',
     timestamp: new Date().toISOString(),
     details: stepDetails,
@@ -299,6 +369,81 @@ export async function detectIntentsNode(state: AgentStateType): Promise<Partial<
   // 2. Deterministic Multi-Intent Rule Engine (100% Reliable & Fast Fallback)
   const detectedIntents: DetectedIntent[] = [];
   const entities: Record<string, any> = {};
+
+  const isOwnerUser = state.userProfile?.role === UserRole.OWNER || state.userProfile?.role === UserRole.ADMIN;
+
+  // Check Intent: PORTFOLIO_OVERVIEW (Owner queries about revenue, total rent, collection, properties)
+  const isPortfolioQuery =
+    message.includes('portfolio') ||
+    message.includes('total revenue') ||
+    message.includes('total rent') ||
+    message.includes('rent collection') ||
+    message.includes('rent collected') ||
+    message.includes('monthly revenue') ||
+    message.includes('overall revenue') ||
+    message.includes('total properties') ||
+    message.includes('properties overview') ||
+    message.includes('कुल किराया') ||
+    message.includes('कुल आय') ||
+    (isOwnerUser && (message.includes('revenue') || message.includes('collection') || message.includes('earnings')));
+
+  if (isPortfolioQuery) {
+    detectedIntents.push({
+      intent: 'PORTFOLIO_OVERVIEW',
+      confidence: 0.98,
+      entities: {},
+    });
+  }
+
+  // Check Intent: VACANCY_STATUS (Owner queries for vacant rooms & occupancy rates)
+  const isVacancyQuery =
+    message.includes('vacan') ||
+    message.includes('occupan') ||
+    message.includes('empty room') ||
+    message.includes('available room') ||
+    message.includes('unoccupied') ||
+    message.includes('खाली कमरे') ||
+    message.includes('कमरे खाली');
+
+  if (isVacancyQuery && (isOwnerUser || message.includes('vacan') || message.includes('occupan'))) {
+    detectedIntents.push({
+      intent: 'VACANCY_STATUS',
+      confidence: 0.97,
+      entities: {},
+    });
+  }
+
+  // Check Intent: TENANT_LIST (Owner queries for tenant roster)
+  const isTenantListQuery =
+    message.includes('all tenants') ||
+    message.includes('tenant list') ||
+    message.includes('tenant roster') ||
+    message.includes('list of tenants') ||
+    message.includes('who is staying') ||
+    message.includes('active tenants') ||
+    message.includes('show tenants') ||
+    message.includes('किराएदारों की सूची') ||
+    message.includes('सभी किराएदार');
+
+  if (isTenantListQuery && (isOwnerUser || message.includes('tenant list') || message.includes('all tenants'))) {
+    detectedIntents.push({
+      intent: 'TENANT_LIST',
+      confidence: 0.97,
+      entities: {},
+    });
+  }
+
+  // Check Intent: OWNER_MAINTENANCE_OVERVIEW (Cross-property maintenance tickets for owner)
+  const isOwnerMaintenanceOverviewQuery =
+    (isOwnerUser && (message.includes('all maintenance') || message.includes('maintenance overview') || message.includes('open tickets') || message.includes('tickets across') || message.includes('all tickets')));
+
+  if (isOwnerMaintenanceOverviewQuery) {
+    detectedIntents.push({
+      intent: 'OWNER_MAINTENANCE_OVERVIEW',
+      confidence: 0.96,
+      entities: {},
+    });
+  }
 
   // Check Intent: OWNER_NOTIFICATION (Prioritized if user specifically commands to notify/tell owner)
   const isExplicitOwnerCommand =
@@ -381,18 +526,23 @@ export async function detectIntentsNode(state: AgentStateType): Promise<Partial<
 
   // Check Intent: MAINTENANCE_REPORT
   const hasMaintenanceReport =
-    message.includes('not working') ||
-    message.includes("isn't working") ||
-    message.includes('broken') ||
-    message.includes('leak') ||
-    message.includes('repair') ||
-    message.includes('fix') ||
-    message.includes('ac') ||
-    message.includes('cooler') ||
-    message.includes('geyser') ||
-    message.includes('tap') ||
-    message.includes('काम नहीं कर रहा') ||
-    message.includes('खराब');
+    !isOwnerUser &&
+    !isPortfolioQuery &&
+    !isVacancyQuery &&
+    !isTenantListQuery &&
+    (message.includes('not working') ||
+      message.includes("isn't working") ||
+      message.includes('broken') ||
+      message.includes('leak') ||
+      message.includes('repair') ||
+      message.includes('fix ') ||
+      message.startsWith('fix') ||
+      /\bac\b/i.test(message) ||
+      message.includes('cooler') ||
+      message.includes('geyser') ||
+      message.includes('tap') ||
+      message.includes('काम नहीं कर रहा') ||
+      message.includes('खराब'));
 
   if (hasMaintenanceReport && !isExplicitOwnerCommand) {
     let category = 'GENERAL';
@@ -400,7 +550,7 @@ export async function detectIntentsNode(state: AgentStateType): Promise<Partial<
     let title = 'Maintenance issue reported';
 
     if (
-      message.includes('ac') ||
+      /\bac\b/i.test(message) ||
       message.includes('air conditioner') ||
       message.includes('cooler') ||
       message.includes('एसी')
@@ -579,6 +729,25 @@ export async function planNode(state: AgentStateType): Promise<Partial<AgentStat
         }
         break;
 
+      case 'PORTFOLIO_OVERVIEW':
+      case 'VACANCY_STATUS':
+        if (!plannedActions.includes('getOwnerPortfolio')) {
+          plannedActions.push('getOwnerPortfolio');
+        }
+        break;
+
+      case 'TENANT_LIST':
+        if (!plannedActions.includes('getOwnerTenants')) {
+          plannedActions.push('getOwnerTenants');
+        }
+        break;
+
+      case 'OWNER_MAINTENANCE_OVERVIEW':
+        if (!plannedActions.includes('getOwnerMaintenanceOverview')) {
+          plannedActions.push('getOwnerMaintenanceOverview');
+        }
+        break;
+
       case 'RENTAL_INFORMATION':
         if (!plannedActions.includes('getTenancy')) {
           plannedActions.push('getTenancy');
@@ -633,6 +802,17 @@ export async function authorizeNode(state: AgentStateType): Promise<Partial<Agen
           isAuthorized = true;
         } else {
           rejectReason = 'Unauthorized to access payment records for this tenancy';
+        }
+        break;
+
+      case 'getOwnerPortfolio':
+      case 'getOwnerTenants':
+      case 'getOwnerMaintenanceOverview':
+        // Portfolio queries are restricted to property owners and administrators
+        if (userProfile.role === UserRole.OWNER || userProfile.role === UserRole.ADMIN) {
+          isAuthorized = true;
+        } else {
+          rejectReason = 'Unauthorized: Only property owners or admins can access portfolio data';
         }
         break;
 
@@ -718,7 +898,18 @@ export async function executeNode(state: AgentStateType): Promise<Partial<AgentS
   // Dependent batch: createMaintenanceTask (needs issueId), notifyOwner (needs issue context)
 
   const independentTools = authorizedActions.filter((t) =>
-    ['getRentStatus', 'validatePayment', 'createMaintenanceIssue', 'getMaintenanceIssues', 'getProperty', 'getRoom', 'getTenancy'].includes(t)
+    [
+      'getRentStatus',
+      'validatePayment',
+      'createMaintenanceIssue',
+      'getMaintenanceIssues',
+      'getProperty',
+      'getRoom',
+      'getTenancy',
+      'getOwnerPortfolio',
+      'getOwnerTenants',
+      'getOwnerMaintenanceOverview',
+    ].includes(t)
   );
 
   const dependentTools = authorizedActions.filter((t) =>
@@ -763,6 +954,12 @@ export async function executeNode(state: AgentStateType): Promise<Partial<AgentS
         input = { roomId: context.tenancy?.roomId };
       } else if (toolName === 'getTenancy') {
         input = { tenancyId: context.tenancy?.id };
+      } else if (
+        toolName === 'getOwnerPortfolio' ||
+        toolName === 'getOwnerTenants' ||
+        toolName === 'getOwnerMaintenanceOverview'
+      ) {
+        input = {};
       }
     }
 
@@ -775,7 +972,7 @@ export async function executeNode(state: AgentStateType): Promise<Partial<AgentS
         status: 'FAILED',
         input,
         output: {},
-        error: err.message,
+        error: err.message || 'Tool execution threw an uncaught error',
       };
     }
   }
@@ -807,6 +1004,9 @@ export async function executeNode(state: AgentStateType): Promise<Partial<AgentS
       let label = `Executed ${toolName}`;
       if (toolName === 'getRentStatus') label = 'Rent status validated (Parallel)';
       if (toolName === 'createMaintenanceIssue') label = 'Maintenance issue created (Parallel)';
+      if (toolName === 'getOwnerPortfolio') label = 'Owner portfolio retrieved (Parallel)';
+      if (toolName === 'getOwnerTenants') label = 'Tenant roster retrieved (Parallel)';
+      if (toolName === 'getOwnerMaintenanceOverview') label = 'Maintenance overview retrieved (Parallel)';
 
       executionSteps.push({
         id: `step-${toolName}-${Date.now()}`,
@@ -993,6 +1193,76 @@ export async function verifyNode(state: AgentStateType): Promise<Partial<AgentSt
         } else {
           intentStatus = 'FAILED';
           summary = notifyRes?.error || 'Could not dispatch owner notification';
+        }
+        break;
+      }
+
+      case 'PORTFOLIO_OVERVIEW': {
+        tools.push('getOwnerPortfolio');
+        const r = results.getOwnerPortfolio;
+        if (r?.status === 'SUCCESS') {
+          const p = r.output;
+          verificationResults['PORTFOLIO'] = {
+            verified: true,
+            details: `${p.totalProperties} properties, ${p.occupancyRate}% occupancy, ₹${p.collectedRent?.toLocaleString('en-IN')} collected`,
+          };
+          summary = `Portfolio: ${p.totalProperties} properties, ${p.occupiedRooms}/${p.totalRooms} rooms occupied (${p.occupancyRate}% occupancy). Rent collected: ₹${p.collectedRent?.toLocaleString('en-IN')}, Pending: ₹${p.pendingRent?.toLocaleString('en-IN')}.`;
+        } else {
+          intentStatus = 'FAILED';
+          summary = r?.error || 'Could not retrieve portfolio overview';
+        }
+        break;
+      }
+
+      case 'VACANCY_STATUS': {
+        tools.push('getOwnerPortfolio');
+        const r = results.getOwnerPortfolio;
+        if (r?.status === 'SUCCESS') {
+          const p = r.output;
+          verificationResults['VACANCY'] = {
+            verified: true,
+            details: `${p.vacantRooms} vacant rooms across ${p.totalProperties} properties`,
+          };
+          summary = `You have ${p.vacantRooms} vacant room(s) available across ${p.totalProperties} properties (Occupancy: ${p.occupancyRate}%).`;
+        } else {
+          intentStatus = 'FAILED';
+          summary = r?.error || 'Could not retrieve vacancy status';
+        }
+        break;
+      }
+
+      case 'TENANT_LIST': {
+        tools.push('getOwnerTenants');
+        const r = results.getOwnerTenants;
+        if (r?.status === 'SUCCESS') {
+          const tenants = r.output?.tenants || [];
+          verificationResults['TENANTS'] = {
+            verified: true,
+            details: `Found ${tenants.length} active tenants`,
+          };
+          summary = tenants.length > 0
+            ? tenants.map((t: any, idx: number) => `${idx + 1}. ${t.name} (${t.propertyName}, Room ${t.roomNumber}) — Rent: ₹${t.monthlyRent?.toLocaleString('en-IN')} (${t.rentStatus})`).join('\n')
+            : 'No active tenants found across your properties.';
+        } else {
+          intentStatus = 'FAILED';
+          summary = r?.error || 'Could not retrieve tenant roster';
+        }
+        break;
+      }
+
+      case 'OWNER_MAINTENANCE_OVERVIEW': {
+        tools.push('getOwnerMaintenanceOverview');
+        const r = results.getOwnerMaintenanceOverview;
+        if (r?.status === 'SUCCESS') {
+          const m = r.output;
+          verificationResults['MAINTENANCE_OVERVIEW'] = {
+            verified: true,
+            details: `${m.openCount} open tickets, ${m.resolvedCount} resolved`,
+          };
+          summary = `Maintenance Overview: ${m.openCount} active ticket(s), ${m.resolvedCount} resolved.`;
+        } else {
+          intentStatus = 'FAILED';
+          summary = r?.error || 'Could not retrieve maintenance overview';
         }
         break;
       }
@@ -1346,9 +1616,135 @@ export async function respondNode(state: AgentStateType): Promise<Partial<AgentS
         break;
       }
 
-      default:
-        responseParts.push(`${item.intent}: ${item.summary}`);
+      case 'PORTFOLIO_OVERVIEW': {
+        const p = results.getOwnerPortfolio?.output;
+        if (isSuccess && p) {
+          const coll = Number(p.collectedRent ?? p.totalRentCollected ?? 0).toLocaleString('en-IN');
+          const pend = Number(p.pendingRent ?? p.totalRentPending ?? 0).toLocaleString('en-IN');
+          const exp = Number(p.expectedMonthlyRent ?? p.totalMonthlyExpectedRent ?? 0).toLocaleString('en-IN');
+          const activeMaint = p.activeMaintenanceCount ?? p.totalOpenMaintenance ?? 0;
+          responseParts.push(
+            `### 🏢 Portfolio Performance Summary\n\n` +
+            `• **Properties Under Management:** ${p.totalProperties}\n` +
+            `• **Occupancy Rate:** **${p.occupancyRate}%** (${p.occupiedRooms} occupied / ${p.vacantRooms} vacant / ${p.totalRooms} total rooms)\n` +
+            `• **Rent Collected:** **₹${coll}** (Expected: ₹${exp})\n` +
+            `• **Rent Pending:** **₹${pend}**\n` +
+            `• **Active Maintenance:** ${activeMaint} open ticket(s)`
+          );
+        } else {
+          responseParts.push(`Portfolio Overview: ${item.summary}`);
+        }
         break;
+      }
+
+      case 'VACANCY_STATUS': {
+        const p = results.getOwnerPortfolio?.output;
+        if (isSuccess && p) {
+          const propSummaries = p.propertiesSummary || p.properties || [];
+          responseParts.push(
+            `### 🛏️ Vacancy & Room Availability\n\n` +
+            `• **Vacant Rooms:** **${p.vacantRooms}** available for immediate lease\n` +
+            `• **Occupied Rooms:** ${p.occupiedRooms} of ${p.totalRooms} (${p.occupancyRate}% occupancy)\n` +
+            (propSummaries.length > 0
+              ? `\n**Breakdown by Property:**\n` +
+                propSummaries.map((prop: any) => `• **${prop.name}**: ${prop.occupiedRooms}/${prop.totalRooms} rooms occupied (${prop.occupancyRate}%)`).join('\n')
+              : '')
+          );
+        } else {
+          responseParts.push(`Vacancy Status: ${item.summary}`);
+        }
+        break;
+      }
+
+      case 'TENANT_LIST': {
+        const tr = results.getOwnerTenants?.output;
+        if (isSuccess && tr) {
+          const tenants = tr.tenants || [];
+          responseParts.push(
+            `### 👥 Active Tenant Roster (${tr.count} Total)\n\n` +
+            (tenants.length > 0
+              ? tenants.map((t: any, idx: number) =>
+                  `**${idx + 1}. ${t.name}**\n` +
+                  `   • Property: ${t.propertyName} (Room ${t.roomNumber})\n` +
+                  `   • Monthly Rent: ₹${Number(t.monthlyRent).toLocaleString('en-IN')}\n` +
+                  `   • Status: ${t.rentStatus === 'PAID' ? '✅ Paid' : '⏳ ' + t.rentStatus}${t.dueDate ? ` (Due: ${t.dueDate})` : ''}`
+                ).join('\n\n')
+              : 'No active tenants found across your properties.')
+          );
+        } else {
+          responseParts.push(`Tenant Roster: ${item.summary}`);
+        }
+        break;
+      }
+
+      case 'OWNER_MAINTENANCE_OVERVIEW': {
+        const mo = results.getOwnerMaintenanceOverview?.output;
+        if (isSuccess && mo) {
+          const issues = mo.issues || [];
+          responseParts.push(
+            `### 🔧 Cross-Property Maintenance Triage\n\n` +
+            `• **Total Tickets:** ${mo.total} (${mo.openCount} Active, ${mo.resolvedCount} Resolved)\n\n` +
+            (issues.length > 0
+              ? issues.slice(0, 5).map((i: any, idx: number) =>
+                  `**${idx + 1}. ${i.title}** (${i.priority} Priority)\n` +
+                  `   • Property: ${i.property}\n` +
+                  `   • Status: \`${i.status}\` | Technician: ${i.assignedTechnician}\n` +
+                  `   • Reported By: ${i.reportedBy} on ${i.createdAt}`
+                ).join('\n\n')
+              : 'No maintenance issues recorded.')
+          );
+        } else {
+          responseParts.push(`Maintenance Overview: ${item.summary}`);
+        }
+        break;
+      }
+
+      case 'PROPERTY_INFORMATION': {
+        const prop = results.getProperty?.output;
+        const memories = context.relevantMemories || [];
+        const knowledgeSnippets = memories
+          .filter(
+            (m) =>
+              m.memoryType?.startsWith('PROPERTY_') ||
+              m.memoryType === 'MESS_SCHEDULE' ||
+              m.memoryType === 'FACILITY_SPEC' ||
+              m.memoryType === 'APPLIANCE_SPEC'
+          )
+          .map((m) => `• ${m.summary}`)
+          .join('\n\n');
+
+        if (knowledgeSnippets) {
+          responseParts.push(
+            `### 📍 Property Information & Knowledge Graph\n\n${knowledgeSnippets}`
+          );
+        } else if (prop) {
+          responseParts.push(
+            `### 📍 Property Details\n\n` +
+              `• **Name:** ${prop.name}\n` +
+              `• **Address:** ${prop.address}, ${prop.city}\n` +
+              `• **Amenities:** ${prop.amenities?.join(', ') || 'N/A'}`
+          );
+        } else {
+          responseParts.push(`Property Information: ${item.summary}`);
+        }
+        break;
+      }
+
+      default: {
+        // If query matched any specific Cognee knowledge memories, present them
+        const matchingMemories = (context.relevantMemories || []).filter(
+          (m) => m.memoryType !== 'INTERACTION_SUMMARY' && (m.score ?? 0) > 0.3
+        );
+        if (matchingMemories.length > 0) {
+          responseParts.push(
+            `### 💡 Knowledge Graph Retrieval\n\n` +
+              matchingMemories.map((m) => `• ${m.summary}`).join('\n\n')
+          );
+        } else {
+          responseParts.push(`${item.intent}: ${item.summary}`);
+        }
+        break;
+      }
     }
   }
 
@@ -1357,8 +1753,9 @@ export async function respondNode(state: AgentStateType): Promise<Partial<AgentS
   let memoryNotice = '';
   if (
     prev &&
+    state.userProfile?.role === UserRole.TENANT &&
     (detectedIntents.some((i) => i.intent === 'MAINTENANCE_REPORT' || i.intent === 'MAINTENANCE_STATUS') ||
-      userMessage.toLowerCase().includes('ac') ||
+      /\bac\b/i.test(userMessage) ||
       userMessage.toLowerCase().includes('broken'))
   ) {
     memoryNotice = `Previous related maintenance issue found.\n\nYou previously reported "${prev.title}" for this property (Status: ${prev.status}, Resolution: ${prev.resolution || 'AC service completed'}). Since this issue has recurred, I have escalated it with HIGH priority to the property owner and technician.\n\n`;
