@@ -233,7 +233,7 @@ export default function TenantDashboard() {
       <div className="flex items-center justify-center min-h-[400px]">
         <div className="flex items-center gap-3 text-indigo-400">
           <Sparkles className="h-5 w-5 animate-spin" />
-          <span>Loading Tenant Operating System...</span>
+          <span>Setting things up...</span>
         </div>
       </div>
     );
@@ -316,7 +316,7 @@ export default function TenantDashboard() {
               Report Maintenance or Service Request
             </CardTitle>
             <CardDescription className="text-xs">
-              This triggers the autonomous lifecycle state machine from Rent Due/Payment to Issue
+              Describe what&apos;s wrong — we&apos;ll take care of the rest
             </CardDescription>
           </CardHeader>
           <CardContent>
@@ -589,9 +589,9 @@ export default function TenantDashboard() {
             </div>
           </CardContent>
           <CardFooter className="text-xs text-slate-500 flex justify-between">
-            <span>Powered by MockNotificationProvider</span>
+            <span>Recent activity</span>
             <Link href="/notifications" className="text-indigo-400 hover:underline">
-              View All Alerts &rarr;
+              View all &rarr;
             </Link>
           </CardFooter>
         </Card>

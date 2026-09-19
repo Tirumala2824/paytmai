@@ -94,19 +94,15 @@ export default function PaymentsPage() {
     <div className="space-y-6">
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
-          <div className="flex items-center gap-2">
-            <Badge variant="default">Paytm Integrated Gateway</Badge>
-            <span className="text-xs text-slate-400">Automated Reconciliation</span>
-          </div>
-          <h1 className="text-2xl font-bold text-white mt-1">Rent & Payments</h1>
-          <p className="text-xs text-slate-400">
-            Paytm adapter, UPI, and instant digital payment confirmation
+          <h1 className="text-2xl font-bold text-white">Rent &amp; Payments</h1>
+          <p className="text-xs text-slate-400 mt-0.5">
+            All your payments, in one place
           </p>
         </div>
 
-        <div className="flex items-center gap-2 text-xs text-slate-400 bg-slate-900 border border-slate-800 px-3 py-2 rounded-xl">
-          <ShieldCheck className="h-4 w-4 text-emerald-400" />
-          <span>Paytm Mock Adapter Active</span>
+        <div className="flex items-center gap-2 text-xs text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 px-3 py-2 rounded-xl">
+          <CheckCircle2 className="h-4 w-4" />
+          <span>Payments secured</span>
         </div>
       </div>
 
@@ -123,13 +119,13 @@ export default function PaymentsPage() {
       {/* Summary Cards */}
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
         <Card className="border-slate-800 bg-slate-900/60 p-4">
-          <span className="text-xs text-slate-400">Total Paid (YTD)</span>
+          <span className="text-xs text-slate-400">Total Paid</span>
           <div className="text-2xl font-bold text-white mt-1">{formatCurrency(36000)}</div>
-          <span className="text-[11px] text-emerald-400 mt-1 block">2 Months Cleared</span>
+          <span className="text-[11px] text-emerald-400 mt-1 block">2 months cleared ✓</span>
         </Card>
 
         <Card className="border-slate-800 bg-slate-900/60 p-4">
-          <span className="text-xs text-slate-400">Current Outstanding</span>
+          <span className="text-xs text-slate-400">Amount Due Now</span>
           <div className="text-2xl font-bold text-amber-400 mt-1">{formatCurrency(18000)}</div>
           <span className="text-[11px] text-slate-400 mt-1 block">Due for Sep 2026</span>
         </Card>
@@ -137,7 +133,7 @@ export default function PaymentsPage() {
         <Card className="border-slate-800 bg-slate-900/60 p-4">
           <span className="text-xs text-slate-400">Security Deposit</span>
           <div className="text-2xl font-bold text-white mt-1">{formatCurrency(36000)}</div>
-          <span className="text-[11px] text-slate-400 mt-1 block">Escrow Protected</span>
+          <span className="text-[11px] text-slate-400 mt-1 block">Protected &amp; held safely</span>
         </Card>
       </div>
 
