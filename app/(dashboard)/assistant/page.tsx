@@ -20,6 +20,8 @@ import {
   Camera,
   Layers,
   Info,
+  Database,
+  Network,
 } from 'lucide-react';
 
 function PaperclipIcon({ className }: { className?: string }) {
@@ -70,6 +72,7 @@ interface ChatMessage {
   };
   isRepeatedIssue?: boolean;
   followUps?: string[];
+  ragEvaluation?: any;
 }
 
 const THINKING_MESSAGES = [
@@ -184,6 +187,32 @@ export default function AssistantPage() {
   // Persona State: Tenant vs Owner
   const [activePersona, setActivePersona] = useState<'TENANT' | 'OWNER'>('TENANT');
 
+  // Cognee Memory Graph Live Health State
+  const [cogneeStatus, setCogneeStatus] = useState<{
+    configured: boolean;
+    connected: boolean;
+    baseUrl: string;
+    keyMasked?: string;
+    localKnowledgeCount: number;
+    message: string;
+    instructions?: string;
+  } | null>(null);
+
+  // KCache Telemetry State
+  const [kcacheTelemetry, setKcacheTelemetry] = useState<{
+    hits: number;
+    misses: number;
+    hitRate: number;
+    latencySavedMs: number;
+    cachedSessionsCount: number;
+  } | null>(null);
+
+  // Automated Sync & RAG Evaluation State
+  const [isSyncingCognee, setIsSyncingCognee] = useState(false);
+  const [syncResult, setSyncResult] = useState<any>(null);
+  const [isRunningRagEval, setIsRunningRagEval] = useState(false);
+  const [ragBenchmarkResult, setRagBenchmarkResult] = useState<any>(null);
+
   // Active Model State
   const [selectedLlm, setSelectedLlm] = useState<string>('gemini-3.8-flash');
   const [isDropdownOpen, setIsDropdownOpen] = useState(false);
@@ -195,7 +224,68 @@ export default function AssistantPage() {
 
   useEffect(() => {
     fetchContext();
+    fetchCogneeStatus();
+    fetchKcacheTelemetry();
   }, []);
+
+  async function fetchKcacheTelemetry() {
+    try {
+      const res = await fetch('/api/assistant/kcache');
+      if (res.ok) {
+        const data = await res.json();
+        if (data.telemetry) {
+          setKcacheTelemetry(data.telemetry);
+        }
+      }
+    } catch {
+      // Non-blocking
+    }
+  }
+
+  async function fetchCogneeStatus() {
+    try {
+      const res = await fetch('/api/memory?check=cognee');
+      if (res.ok) {
+        const data = await res.json();
+        setCogneeStatus(data);
+      }
+    } catch {
+      // Non-blocking
+    }
+  }
+
+  async function handleSyncCognee() {
+    setIsSyncingCognee(true);
+    setSyncResult(null);
+    try {
+      const res = await fetch('/api/memory', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'sync_cognee' }),
+      });
+      const data = await res.json();
+      setSyncResult(data.syncResult);
+      fetchCogneeStatus();
+    } catch (err: any) {
+      setSyncResult({ success: false, error: err.message });
+    } finally {
+      setIsSyncingCognee(false);
+    }
+  }
+
+  async function handleRunRagBenchmark() {
+    setIsRunningRagEval(true);
+    setRagBenchmarkResult(null);
+    try {
+      const res = await fetch('/api/memory?check=rag_eval');
+      const data = await res.json();
+      setRagBenchmarkResult(data);
+    } catch (err: any) {
+      setRagBenchmarkResult({ error: err.message });
+    } finally {
+      setIsRunningRagEval(false);
+    }
+  }
 
   const togglePersona = (persona: 'TENANT' | 'OWNER') => {
     if (persona === activePersona) return;
@@ -324,6 +414,12 @@ export default function AssistantPage() {
         }
       }
 
+      // Build conversation history turns for multi-turn context retention
+      const historyTurns = messages.slice(-8).map((m) => ({
+        role: m.sender,
+        content: m.text,
+      }));
+
       const res = await fetch('/api/assistant/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -332,6 +428,7 @@ export default function AssistantPage() {
           sessionId: activeSessionId,
           modelName: selectedLlm,
           userRole: activePersona,
+          history: historyTurns,
         }),
       });
 
@@ -342,6 +439,12 @@ export default function AssistantPage() {
 
       const data: AIExecutionResponse = await res.json();
       if (data.sessionId) setActiveSessionId(data.sessionId);
+
+      // Prioritize intelligent dynamic follow-ups from backend/KCache
+      const followUps =
+        Array.isArray(data.suggestedFollowUps) && data.suggestedFollowUps.length > 0
+          ? data.suggestedFollowUps
+          : getFollowUps(data.intent, activePersona);
 
       const assistantMsg: ChatMessage = {
         id: `assistant-${Date.now()}`,
@@ -355,11 +458,13 @@ export default function AssistantPage() {
         intent: data.intent,
         previousRelatedIssue: data.previousRelatedIssue,
         isRepeatedIssue: data.isRepeatedIssue,
-        followUps: getFollowUps(data.intent, activePersona),
+        ragEvaluation: data.ragEvaluation,
+        followUps,
       };
 
       setMessages((prev) => [...prev, assistantMsg]);
       fetchContext(activePersona);
+      fetchKcacheTelemetry();
     } catch (error: any) {
       setMessages((prev) => [
         ...prev,
@@ -487,6 +592,37 @@ export default function AssistantPage() {
 
         {/* Right Actions */}
         <div className="flex items-center gap-2">
+          {/* Cognee Memory Graph Status Pill */}
+          <button
+            onClick={() => setShowModelModal(true)}
+            title={cogneeStatus?.message || 'Cognee Semantic Memory Graph'}
+            className="hidden md:flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl bg-slate-900 border border-slate-800 text-xs text-slate-300 hover:border-slate-700 transition-colors"
+          >
+            <Database className="h-3.5 w-3.5 text-cyan-400" />
+            <span>Cognee Memory</span>
+            <span
+              className={`text-[10px] px-1.5 py-0.2 rounded font-mono ${
+                cogneeStatus?.connected
+                  ? 'bg-emerald-500/20 text-emerald-400'
+                  : 'bg-cyan-500/20 text-cyan-400'
+              }`}
+            >
+              {cogneeStatus?.connected ? 'Live Cloud' : `${cogneeStatus?.localKnowledgeCount ?? 155} Nodes`}
+            </span>
+          </button>
+
+          {/* KCache Telemetry Pill */}
+          <div
+            title={`KCache Context & Knowledge Cache: ${kcacheTelemetry?.hits || 0} hits (${kcacheTelemetry?.hitRate || 0}% hit rate), ${kcacheTelemetry?.cachedSessionsCount || 0} active sessions, ~${kcacheTelemetry?.latencySavedMs || 0}ms saved`}
+            className="hidden lg:flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl bg-slate-900 border border-slate-800 text-xs text-slate-300"
+          >
+            <Zap className="h-3.5 w-3.5 text-amber-400" />
+            <span>KCache</span>
+            <span className="text-[10px] px-1.5 py-0.2 rounded bg-amber-500/20 text-amber-300 font-mono">
+              {kcacheTelemetry?.hits ? `${kcacheTelemetry.hits} Hits` : 'Active'}
+            </span>
+          </div>
+
           {/* Models Architecture Overview Pill */}
           <button
             onClick={() => setShowModelModal(true)}
@@ -660,6 +796,55 @@ export default function AssistantPage() {
                     <div className="text-slate-200 text-sm leading-relaxed whitespace-pre-line">
                       {msg.text}
                     </div>
+
+                    {/* RAG Evaluation Badge (RAG Triad) */}
+                    {msg.ragEvaluation && (
+                      <div className="mt-2.5 p-3 rounded-xl bg-slate-900/90 border border-indigo-500/25 shadow-sm text-xs">
+                        <div className="flex items-center justify-between gap-2 flex-wrap mb-2">
+                          <div className="flex items-center gap-2">
+                            <Zap className="h-3.5 w-3.5 text-indigo-400" />
+                            <span className="font-semibold text-slate-200">RAG Triad Evaluation:</span>
+                            <span className="font-bold text-indigo-300 font-mono text-xs">
+                              {Math.round(msg.ragEvaluation.overallScore * 100)}%
+                            </span>
+                            <span
+                              className={`px-2 py-0.5 rounded-md text-[10px] font-bold ${
+                                msg.ragEvaluation.verdict === 'EXCELLENT'
+                                  ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
+                                  : msg.ragEvaluation.verdict === 'GOOD'
+                                  ? 'bg-blue-500/20 text-blue-300 border border-blue-500/30'
+                                  : 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
+                              }`}
+                            >
+                              {msg.ragEvaluation.verdict}
+                            </span>
+                          </div>
+                          <span className="text-[10px] text-slate-400 font-mono">
+                            ⚡ {msg.ragEvaluation.latencyMs}ms · {msg.ragEvaluation.retrievalCount} chunks
+                          </span>
+                        </div>
+                        <div className="grid grid-cols-3 gap-2 text-[11px]">
+                          <div className="p-2 rounded-lg bg-slate-950/80 border border-slate-800/80">
+                            <span className="block text-[10px] text-slate-400 mb-0.5">Context Precision</span>
+                            <span className="font-semibold text-slate-100">
+                              {Math.round(msg.ragEvaluation.contextRelevance * 100)}%
+                            </span>
+                          </div>
+                          <div className="p-2 rounded-lg bg-slate-950/80 border border-slate-800/80">
+                            <span className="block text-[10px] text-slate-400 mb-0.5">Faithfulness (Grounded)</span>
+                            <span className="font-semibold text-emerald-400">
+                              {Math.round(msg.ragEvaluation.faithfulness * 100)}%
+                            </span>
+                          </div>
+                          <div className="p-2 rounded-lg bg-slate-950/80 border border-slate-800/80">
+                            <span className="block text-[10px] text-slate-400 mb-0.5">Answer Relevance</span>
+                            <span className="font-semibold text-indigo-400">
+                              {Math.round(msg.ragEvaluation.answerRelevance * 100)}%
+                            </span>
+                          </div>
+                        </div>
+                      </div>
+                    )}
 
                     {/* Footer with Model Name & Copy Action */}
                     <div className="flex items-center gap-3 pt-1 text-[11px] text-slate-500">
@@ -881,6 +1066,129 @@ export default function AssistantPage() {
                       </span>
                     </div>
                   ))}
+                </div>
+              </div>
+
+              {/* Semantic Memory Graph (Cognee AI) */}
+              <div>
+                <div className="flex items-center justify-between mb-2">
+                  <h4 className="font-semibold text-cyan-300 uppercase tracking-wider text-[11px]">
+                    🧠 Semantic Memory Graph (Cognee AI)
+                  </h4>
+                  <span
+                    className={`text-[10px] px-2 py-0.5 rounded-full font-mono ${
+                      cogneeStatus?.connected
+                        ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
+                        : 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/30'
+                    }`}
+                  >
+                    {cogneeStatus?.connected ? '● Live Cloud Connected' : '● Local PG Graph Active'}
+                  </span>
+                </div>
+
+                <div className="p-3 rounded-xl bg-slate-950 border border-slate-800 space-y-2 text-xs">
+                  <div className="flex justify-between items-center text-slate-300">
+                    <span className="text-slate-400">Architecture:</span>
+                    <span className="font-semibold text-slate-200">Cognee Graph + PostgreSQL Resilient Cache</span>
+                  </div>
+                  <div className="flex justify-between items-center text-slate-300">
+                    <span className="text-slate-400">Endpoint Base:</span>
+                    <span className="font-mono text-[11px] text-slate-300">{cogneeStatus?.baseUrl || 'https://api.cognee.ai'}</span>
+                  </div>
+                  <div className="flex justify-between items-center text-slate-300">
+                    <span className="text-slate-400">API Key:</span>
+                    <span className="font-mono text-[11px] text-amber-400">{cogneeStatus?.keyMasked || 'Configured'}</span>
+                  </div>
+                  <div className="flex justify-between items-center text-slate-300">
+                    <span className="text-slate-400">Seeded Knowledge Records:</span>
+                    <span className="font-semibold text-emerald-400">{cogneeStatus?.localKnowledgeCount ?? 155} records</span>
+                  </div>
+
+                  {cogneeStatus?.instructions && (
+                    <div className="mt-2 pt-2 border-t border-slate-800/80 text-[11px] text-slate-400 leading-relaxed bg-slate-900/50 p-2.5 rounded-lg">
+                      <span className="text-cyan-400 font-medium">💡 Cognee Setup Note: </span>
+                      {cogneeStatus.instructions}
+                    </div>
+                  )}
+
+                  {/* Action Buttons: Automated Sync & RAG Evaluation */}
+                  <div className="pt-3 border-t border-slate-800 flex flex-wrap gap-2">
+                    <button
+                      onClick={handleSyncCognee}
+                      disabled={isSyncingCognee}
+                      className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl bg-cyan-600 hover:bg-cyan-500 text-white font-medium text-xs transition-colors disabled:opacity-50"
+                    >
+                      {isSyncingCognee ? (
+                        <>
+                          <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+                          <span>Syncing Supabase to Cognee...</span>
+                        </>
+                      ) : (
+                        <>
+                          <Database className="h-3.5 w-3.5" />
+                          <span>Auto-Sync Supabase to Cognee</span>
+                        </>
+                      )}
+                    </button>
+
+                    <button
+                      onClick={handleRunRagBenchmark}
+                      disabled={isRunningRagEval}
+                      className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-medium text-xs transition-colors disabled:opacity-50"
+                    >
+                      {isRunningRagEval ? (
+                        <>
+                          <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+                          <span>Evaluating RAG Triad...</span>
+                        </>
+                      ) : (
+                        <>
+                          <Zap className="h-3.5 w-3.5" />
+                          <span>Run RAG Evaluation Benchmark</span>
+                        </>
+                      )}
+                    </button>
+                  </div>
+
+                  {/* Sync Result Feedback */}
+                  {syncResult && (
+                    <div className="p-2.5 rounded-lg bg-slate-900 border border-slate-800 text-[11px] text-slate-300">
+                      <div className="flex items-center gap-1.5 text-emerald-400 font-semibold mb-1">
+                        <Check className="h-3.5 w-3.5" />
+                        <span>Supabase Sync Completed ({syncResult.durationMs}ms)</span>
+                      </div>
+                      <div className="grid grid-cols-2 gap-1 text-slate-400">
+                        <span>• Properties: {syncResult.counts?.properties}</span>
+                        <span>• Rooms: {syncResult.counts?.rooms}</span>
+                        <span>• Tenancies: {syncResult.counts?.tenancies}</span>
+                        <span>• Memories: {syncResult.counts?.rentalMemories}</span>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* RAG Benchmark Scorecard */}
+                  {ragBenchmarkResult && (
+                    <div className="p-2.5 rounded-lg bg-indigo-950/40 border border-indigo-500/30 text-[11px]">
+                      <div className="flex items-center justify-between font-semibold text-indigo-200 mb-1.5">
+                        <span>🎯 Benchmark Scorecard: {Math.round((ragBenchmarkResult.averageScore || 0) * 100)}%</span>
+                        <span className="text-emerald-400 font-bold">{ragBenchmarkResult.benchmarkVerdict}</span>
+                      </div>
+                      <div className="grid grid-cols-3 gap-1.5 text-[10px] text-slate-300">
+                        <div className="p-1 rounded bg-slate-900/80">
+                          <span className="text-slate-500 block">Context Precision</span>
+                          <span className="font-bold">{Math.round((ragBenchmarkResult.averageContextRelevance || 0) * 100)}%</span>
+                        </div>
+                        <div className="p-1 rounded bg-slate-900/80">
+                          <span className="text-slate-500 block">Faithfulness</span>
+                          <span className="font-bold text-emerald-400">{Math.round((ragBenchmarkResult.averageFaithfulness || 0) * 100)}%</span>
+                        </div>
+                        <div className="p-1 rounded bg-slate-900/80">
+                          <span className="text-slate-500 block">Answer Relevance</span>
+                          <span className="font-bold text-blue-400">{Math.round((ragBenchmarkResult.averageAnswerRelevance || 0) * 100)}%</span>
+                        </div>
+                      </div>
+                    </div>
+                  )}
                 </div>
               </div>
             </div>

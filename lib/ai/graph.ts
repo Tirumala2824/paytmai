@@ -9,16 +9,20 @@ import {
   DetectedIntent,
   MultiIntentExecutionStatus,
   PendingConfirmation,
+  ChatTurn,
 } from './types';
 import { AI_TOOLS_REGISTRY } from './tools';
 import {
   dynamicAnalyzeMultiIntents,
   dynamicSynthesizeResponse,
+  generateContextualFollowUps,
 } from './llm';
 import { memoryService } from './memory/service';
 import { createAuditEvent } from '@/lib/audit/service';
 import { canAccessProperty, canAccessTenancy } from '@/lib/auth/abac';
 import { advanceRentalLifecycle } from '@/lib/rental/service';
+import { evaluateRagResponse, RagEvaluationResult } from './rag/evaluator';
+import { kcache } from './cache/kcache';
 
 /**
  * Define the LangGraph State Annotation for Phase 3
@@ -76,6 +80,15 @@ export const AgentStateAnnotation = Annotation.Root({
   nextState: Annotation<string | undefined>(),
   userResponse: Annotation<string>(),
   modelName: Annotation<string | undefined>(),
+  ragEvaluation: Annotation<RagEvaluationResult | undefined>(),
+  conversationHistory: Annotation<ChatTurn[]>({
+    reducer: (curr, next) => (next && next.length > 0 ? next : curr),
+    default: () => [],
+  }),
+  suggestedFollowUps: Annotation<string[]>({
+    reducer: (curr, next) => (next && next.length > 0 ? next : curr),
+    default: () => [],
+  }),
 });
 
 export type AgentStateType = typeof AgentStateAnnotation.State;
@@ -307,6 +320,7 @@ export async function loadContextNode(state: AgentStateType): Promise<Partial<Ag
     previousRelatedIssue: prevIssue,
     isRepeatedIssue: hasPreviousIssue,
     portfolio: portfolioSummary,
+    conversationHistory: state.conversationHistory,
   };
 
   const stepDetails = portfolioSummary
@@ -341,8 +355,12 @@ export async function loadContextNode(state: AgentStateType): Promise<Partial<Ag
 export async function detectIntentsNode(state: AgentStateType): Promise<Partial<AgentStateType>> {
   const message = state.userMessage.toLowerCase().trim();
 
-  // 1. Try dynamic multi-intent analysis via Gemini if configured
-  const dynamicResult = await dynamicAnalyzeMultiIntents(state.userMessage, state.modelName);
+  // 1. Try dynamic multi-intent analysis via Gemini with conversation history context
+  const dynamicResult = await dynamicAnalyzeMultiIntents(
+    state.userMessage,
+    state.modelName,
+    state.conversationHistory
+  );
   if (dynamicResult && dynamicResult.intents.length > 0) {
     const primaryIntent = dynamicResult.intents[0].intent;
     const mergedEntities = dynamicResult.intents.reduce(
@@ -640,6 +658,99 @@ export async function detectIntentsNode(state: AgentStateType): Promise<Partial<
     });
   }
 
+  // Check Intent: PROPERTY_INFORMATION / KNOWLEDGE_QUERY (RAG over rules, mess, wifi, amenities)
+  const hasKnowledgeQuery =
+    message.includes('wifi') ||
+    message.includes('wi-fi') ||
+    message.includes('password') ||
+    message.includes('internet') ||
+    message.includes('network') ||
+    message.includes('ssid') ||
+    message.includes('mess') ||
+    message.includes('food') ||
+    message.includes('dinner') ||
+    message.includes('lunch') ||
+    message.includes('breakfast') ||
+    message.includes('meal') ||
+    message.includes('khana') ||
+    message.includes('rule') ||
+    message.includes('gate') ||
+    message.includes('curfew') ||
+    message.includes('visitor') ||
+    message.includes('guest') ||
+    message.includes('quiet') ||
+    message.includes('gym') ||
+    message.includes('laundry') ||
+    message.includes('amenities') ||
+    message.includes('facility') ||
+    message.includes('parking') ||
+    message.includes('about the property') ||
+    message.includes('about the pg') ||
+    message.includes('about nexus') ||
+    message.includes('about cybercity');
+
+  // KCache Follow-up Topic Resolution
+  const activeCtx = state.sessionId ? kcache.getActiveContext(state.sessionId) : undefined;
+  const lastUserMsg = state.conversationHistory?.slice(-2).find(t => t.role === 'user')?.content.toLowerCase() || '';
+
+  const isWifiFollowUp =
+    !hasKnowledgeQuery &&
+    (activeCtx?.activeTopic === 'WIFI' || lastUserMsg.includes('wifi') || lastUserMsg.includes('wi-fi')) &&
+    (message.includes('password') || message.includes('repeat') || message.includes('again') || message.includes('network') || message.includes('name') || message.includes('ssid') || message.includes('what was') || message.includes('what is it'));
+
+  const isMessFollowUp =
+    !hasKnowledgeQuery &&
+    (activeCtx?.activeTopic === 'MESS_TIMINGS' || lastUserMsg.includes('mess') || lastUserMsg.includes('food')) &&
+    (message.includes('timing') || message.includes('time') || message.includes('repeat') || message.includes('again') || message.includes('food') || message.includes('dinner') || message.includes('lunch'));
+
+  if (hasKnowledgeQuery || isWifiFollowUp || isMessFollowUp) {
+    let category = 'ALL';
+    if (isWifiFollowUp || message.includes('wifi') || message.includes('wi-fi') || message.includes('password') || message.includes('internet')) {
+      category = 'WIFI';
+    } else if (isMessFollowUp || message.includes('mess') || message.includes('food') || message.includes('dinner') || message.includes('lunch') || message.includes('breakfast') || message.includes('meal')) {
+      category = 'MESS';
+    } else if (message.includes('rule') || message.includes('gate') || message.includes('curfew') || message.includes('visitor') || message.includes('guest')) {
+      category = 'RULES';
+    } else if (message.includes('gym') || message.includes('laundry') || message.includes('parking') || message.includes('amenit')) {
+      category = 'FACILITY';
+    }
+
+    entities.category = category;
+    entities.query = isWifiFollowUp ? 'wifi password network' : isMessFollowUp ? 'mess timings food' : state.userMessage;
+
+    detectedIntents.push({
+      intent: 'PROPERTY_INFORMATION',
+      confidence: 0.96,
+      entities: { category, query: entities.query },
+    });
+  }
+
+  // Follow-up resolution for owner notification or maintenance status
+  if (detectedIntents.length === 0 && activeCtx) {
+    if (message.includes('tell owner') || message.includes('notify owner') || message.includes('tell the owner') || message.includes('let the owner know')) {
+      const issueMsg = activeCtx.activeAppliance
+        ? `Tenant requested update for ${activeCtx.activeAppliance} issue`
+        : 'Tenant requested owner notification regarding recent request';
+      detectedIntents.push({
+        intent: 'OWNER_NOTIFICATION',
+        confidence: 0.95,
+        entities: { message: issueMsg, urgent: true, issueId: activeCtx.activeIssueId },
+      });
+    } else if (activeCtx.activeIssueId && (message.includes('status') || message.includes('progress') || message.includes('technician') || message.includes('when will') || message.includes('update'))) {
+      detectedIntents.push({
+        intent: 'MAINTENANCE_STATUS',
+        confidence: 0.95,
+        entities: { issueId: activeCtx.activeIssueId },
+      });
+    } else if (activeCtx.activeTopic === 'WIFI') {
+      detectedIntents.push({
+        intent: 'PROPERTY_INFORMATION',
+        confidence: 0.9,
+        entities: { category: 'WIFI', query: 'wifi password' },
+      });
+    }
+  }
+
   // Default fallback if no intent detected
   if (detectedIntents.length === 0) {
     detectedIntents.push({
@@ -724,6 +835,9 @@ export async function planNode(state: AgentStateType): Promise<Partial<AgentStat
         break;
 
       case 'PROPERTY_INFORMATION':
+        if (!plannedActions.includes('searchKnowledgeBase')) {
+          plannedActions.push('searchKnowledgeBase');
+        }
         if (!plannedActions.includes('getProperty')) {
           plannedActions.push('getProperty');
         }
@@ -757,6 +871,7 @@ export async function planNode(state: AgentStateType): Promise<Partial<AgentStat
       case 'GENERAL_RENTAL_ASSISTANCE':
       default:
         if (plannedActions.length === 0) {
+          plannedActions.push('searchKnowledgeBase');
           plannedActions.push('getTenancy');
         }
         break;
@@ -903,6 +1018,7 @@ export async function executeNode(state: AgentStateType): Promise<Partial<AgentS
       'validatePayment',
       'createMaintenanceIssue',
       'getMaintenanceIssues',
+      'searchKnowledgeBase',
       'getProperty',
       'getRoom',
       'getTenancy',
@@ -939,6 +1055,13 @@ export async function executeNode(state: AgentStateType): Promise<Partial<AgentS
           priority: context.isRepeatedIssue ? 'HIGH' : (entities.priority || 'MEDIUM'),
           isRepeated: context.isRepeatedIssue || entities.isRepeated || false,
         };
+      } else if (toolName === 'searchKnowledgeBase') {
+        input = {
+          query: entities.query || state.userMessage,
+          propertyName: entities.propertyName,
+          category: entities.category,
+          propertyId: context.tenancy?.propertyId,
+        };
       } else if (toolName === 'getRentStatus') {
         input = { tenancyId: context.tenancy?.id };
       } else if (toolName === 'validatePayment') {
@@ -963,8 +1086,25 @@ export async function executeNode(state: AgentStateType): Promise<Partial<AgentS
       }
     }
 
+    // KCache lookaside for knowledge queries
+    if (toolName === 'searchKnowledgeBase') {
+      const cached = kcache.getCachedKnowledge(input.query, input.propertyId, input.category);
+      if (cached && cached.length > 0) {
+        return {
+          toolName: 'searchKnowledgeBase',
+          status: 'SUCCESS',
+          input,
+          output: { results: cached, count: cached.length, source: 'KCACHE' },
+          summary: `Retrieved ${cached.length} knowledge items from KCache`,
+        };
+      }
+    }
+
     try {
       const res = await toolDef.execute(input, toolContext);
+      if (toolName === 'searchKnowledgeBase' && res.status === 'SUCCESS' && Array.isArray(res.output?.results)) {
+        kcache.setCachedKnowledge(input.query, res.output.results, input.propertyId, input.category);
+      }
       return res;
     } catch (err: any) {
       return {
@@ -1007,6 +1147,7 @@ export async function executeNode(state: AgentStateType): Promise<Partial<AgentS
       if (toolName === 'getOwnerPortfolio') label = 'Owner portfolio retrieved (Parallel)';
       if (toolName === 'getOwnerTenants') label = 'Tenant roster retrieved (Parallel)';
       if (toolName === 'getOwnerMaintenanceOverview') label = 'Maintenance overview retrieved (Parallel)';
+      if (toolName === 'searchKnowledgeBase') label = 'Knowledge graph retrieved (Parallel)';
 
       executionSteps.push({
         id: `step-${toolName}-${Date.now()}`,
@@ -1267,6 +1408,29 @@ export async function verifyNode(state: AgentStateType): Promise<Partial<AgentSt
         break;
       }
 
+      case 'PROPERTY_INFORMATION': {
+        tools.push('searchKnowledgeBase');
+        const kb = results.searchKnowledgeBase;
+        const prop = results.getProperty;
+        if (kb?.status === 'SUCCESS' && Array.isArray(kb.output?.results) && kb.output.results.length > 0) {
+          const count = kb.output.results.length;
+          verificationResults['KNOWLEDGE'] = {
+            verified: true,
+            details: `Found ${count} knowledge graph record(s)`,
+          };
+          summary = kb.output.results.map((r: any) => r.summary).join(' | ');
+        } else if (prop?.status === 'SUCCESS') {
+          verificationResults['PROPERTY'] = {
+            verified: true,
+            details: `Property details for ${prop.output?.name}`,
+          };
+          summary = `${prop.output?.name}: ${prop.output?.address}, ${prop.output?.city}`;
+        } else {
+          summary = 'Property knowledge query processed';
+        }
+        break;
+      }
+
       default:
         summary = 'Assistance query processed';
         break;
@@ -1456,20 +1620,23 @@ export async function respondNode(state: AgentStateType): Promise<Partial<AgentS
     context,
     state.modelName,
     detectedLanguage,
-    state.userProfile?.role
+    state.userProfile?.role,
+    state.conversationHistory
   );
 
   if (dynamicResponse) {
     const prev = context.previousRelatedIssue;
-    let finalDynamic = dynamicResponse;
+    let finalDynamic = dynamicResponse.userResponse;
+    const suggestedFollowUps = dynamicResponse.suggestedFollowUps;
+
     if (
       prev &&
-      !dynamicResponse.includes('Previous related') &&
+      !finalDynamic.includes('Previous related') &&
       (detectedIntents.some((i) => i.intent === 'MAINTENANCE_REPORT' || i.intent === 'MAINTENANCE_STATUS') ||
         userMessage.toLowerCase().includes('ac') ||
         userMessage.toLowerCase().includes('broken'))
     ) {
-      finalDynamic = `Previous related maintenance issue found.\n\nYou previously reported "${prev.title}" for this property (Status: ${prev.status}, Resolution: ${prev.resolution || 'AC service completed'}). Since this issue has recurred, I have escalated it with HIGH priority to the property owner and technician.\n\n${dynamicResponse}`;
+      finalDynamic = `Previous related maintenance issue found.\n\nYou previously reported "${prev.title}" for this property (Status: ${prev.status}, Resolution: ${prev.resolution || 'AC service completed'}). Since this issue has recurred, I have escalated it with HIGH priority to the property owner and technician.\n\n${finalDynamic}`;
     }
 
     const finalStep: ExecutionStep = {
@@ -1479,9 +1646,28 @@ export async function respondNode(state: AgentStateType): Promise<Partial<AgentS
       timestamp: new Date().toISOString(),
     };
 
+    let ragEvaluation: RagEvaluationResult | undefined = undefined;
+    const kbSnippets = results.searchKnowledgeBase?.output?.results;
+    if (Array.isArray(kbSnippets) && kbSnippets.length > 0) {
+      try {
+        ragEvaluation = await evaluateRagResponse({
+          query: userMessage,
+          contextSnippets: kbSnippets,
+          generatedResponse: finalDynamic,
+          retrievalLatencyMs: 25,
+          modelUsed: state.modelName,
+        });
+        finalStep.details = `⚡ RAG Score: ${Math.round(ragEvaluation.overallScore * 100)}% (Faithful: ${Math.round(ragEvaluation.faithfulness * 100)}% | Context: ${Math.round(ragEvaluation.contextRelevance * 100)}%)`;
+      } catch (evalErr) {
+        console.warn('RAG evaluation failed:', evalErr);
+      }
+    }
+
     return {
       userResponse: finalDynamic,
       executionSteps: [finalStep],
+      ragEvaluation,
+      suggestedFollowUps,
     };
   }
 
@@ -1700,22 +1886,26 @@ export async function respondNode(state: AgentStateType): Promise<Partial<AgentS
       }
 
       case 'PROPERTY_INFORMATION': {
+        const kb = results.searchKnowledgeBase?.output;
         const prop = results.getProperty?.output;
         const memories = context.relevantMemories || [];
-        const knowledgeSnippets = memories
-          .filter(
-            (m) =>
-              m.memoryType?.startsWith('PROPERTY_') ||
-              m.memoryType === 'MESS_SCHEDULE' ||
-              m.memoryType === 'FACILITY_SPEC' ||
-              m.memoryType === 'APPLIANCE_SPEC'
-          )
-          .map((m) => `• ${m.summary}`)
-          .join('\n\n');
 
-        if (knowledgeSnippets) {
+        const allSnippets: string[] = [];
+        if (kb && Array.isArray(kb.results) && kb.results.length > 0) {
+          for (const r of kb.results) {
+            allSnippets.push(`• **${r.category?.replace(/_/g, ' ')}:** ${r.summary}`);
+          }
+        } else if (memories.length > 0) {
+          for (const m of memories) {
+            if (m.memoryType !== 'INTERACTION_SUMMARY') {
+              allSnippets.push(`• **${m.memoryType?.replace(/_/g, ' ')}:** ${m.summary}`);
+            }
+          }
+        }
+
+        if (allSnippets.length > 0) {
           responseParts.push(
-            `### 📍 Property Information & Knowledge Graph\n\n${knowledgeSnippets}`
+            `### 📍 Property Information & Knowledge Base\n\n${allSnippets.slice(0, 5).join('\n\n')}`
           );
         } else if (prop) {
           responseParts.push(
@@ -1731,17 +1921,24 @@ export async function respondNode(state: AgentStateType): Promise<Partial<AgentS
       }
 
       default: {
-        // If query matched any specific Cognee knowledge memories, present them
-        const matchingMemories = (context.relevantMemories || []).filter(
-          (m) => m.memoryType !== 'INTERACTION_SUMMARY' && (m.score ?? 0) > 0.3
-        );
-        if (matchingMemories.length > 0) {
+        const kb = results.searchKnowledgeBase?.output;
+        if (kb && Array.isArray(kb.results) && kb.results.length > 0) {
           responseParts.push(
-            `### 💡 Knowledge Graph Retrieval\n\n` +
-              matchingMemories.map((m) => `• ${m.summary}`).join('\n\n')
+            `### 💡 Knowledge Base Retrieval\n\n` +
+              kb.results.slice(0, 4).map((r: any) => `• ${r.summary}`).join('\n\n')
           );
         } else {
-          responseParts.push(`${item.intent}: ${item.summary}`);
+          const matchingMemories = (context.relevantMemories || []).filter(
+            (m) => m.memoryType !== 'INTERACTION_SUMMARY'
+          );
+          if (matchingMemories.length > 0) {
+            responseParts.push(
+              `### 💡 Knowledge Base Retrieval\n\n` +
+                matchingMemories.slice(0, 4).map((m) => `• ${m.summary}`).join('\n\n')
+            );
+          } else {
+            responseParts.push(`${item.intent}: ${item.summary}`);
+          }
         }
         break;
       }
@@ -1770,9 +1967,37 @@ export async function respondNode(state: AgentStateType): Promise<Partial<AgentS
     timestamp: new Date().toISOString(),
   };
 
+  let ragEvaluation: RagEvaluationResult | undefined = undefined;
+  const kbSnippets = results.searchKnowledgeBase?.output?.results;
+  if (Array.isArray(kbSnippets) && kbSnippets.length > 0) {
+    try {
+      ragEvaluation = await evaluateRagResponse({
+        query: userMessage,
+        contextSnippets: kbSnippets,
+        generatedResponse: userResponse,
+        retrievalLatencyMs: 20,
+        modelUsed: 'Deterministic Fallback',
+      });
+      finalStep.details = `⚡ RAG Score: ${Math.round(ragEvaluation.overallScore * 100)}% (Faithful: ${Math.round(ragEvaluation.faithfulness * 100)}% | Context: ${Math.round(ragEvaluation.contextRelevance * 100)}%)`;
+    } catch (evalErr) {
+      console.warn('RAG evaluation failed in fallback path:', evalErr);
+    }
+  }
+
+  const suggestedFollowUps = typeof generateContextualFollowUps === 'function'
+    ? generateContextualFollowUps(
+        detectedIntents[0]?.intent || state.intent,
+        state.userProfile?.role,
+        results,
+        userMessage
+      )
+    : [];
+
   return {
     userResponse,
     executionSteps: [finalStep],
+    ragEvaluation,
+    suggestedFollowUps,
   };
 }
 

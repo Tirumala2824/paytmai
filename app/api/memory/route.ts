@@ -1,5 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { memoryService, MemoryType } from '@/lib/ai/memory/service';
+import { checkCogneeHealth } from '@/lib/ai/memory/cognee';
+import { syncSupabaseToCognee, getLastSyncTelemetry } from '@/lib/ai/memory/sync';
+import { runRagBenchmark, evaluateRagResponse } from '@/lib/ai/rag/evaluator';
 import { getAuthenticatedUser } from '@/lib/auth/rbac';
 import prisma from '@/lib/db';
 
@@ -7,6 +10,27 @@ export const dynamic = 'force-dynamic';
 
 export async function GET(request: NextRequest) {
   try {
+    const { searchParams } = new URL(request.url);
+    const check = searchParams.get('check');
+
+    // Health / Diagnostics endpoint for Cognee connection
+    if (check === 'cognee' || check === 'health') {
+      const health = await checkCogneeHealth();
+      return NextResponse.json(health);
+    }
+
+    // Automated RAG Evaluation Benchmark endpoint
+    if (check === 'rag_eval' || check === 'rag-benchmark') {
+      const benchmark = await runRagBenchmark();
+      return NextResponse.json(benchmark);
+    }
+
+    // Sync Telemetry endpoint
+    if (check === 'sync' || check === 'sync_status') {
+      const telemetry = getLastSyncTelemetry();
+      return NextResponse.json(telemetry || { status: 'NO_SYNC_YET', message: 'No sync run in this server lifecycle yet.' });
+    }
+
     const auth = await getAuthenticatedUser();
     let userProfile = auth?.userProfile;
 
@@ -19,18 +43,20 @@ export async function GET(request: NextRequest) {
     if (!userProfile) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
-
-    const { searchParams } = new URL(request.url);
     const query = searchParams.get('q');
     const memoryType = searchParams.get('type') as MemoryType | null;
 
     if (query) {
-      const searchResults = await memoryService.search({
-        userProfileId: userProfile.id,
+      const propertyName = searchParams.get('property') || undefined;
+      const category = searchParams.get('category') || undefined;
+      const searchResults = await memoryService.searchKnowledgeGraph({
         query,
+        propertyName,
+        category,
+        userProfileId: userProfile.id,
         limit: 10,
       });
-      return NextResponse.json({ query, results: searchResults });
+      return NextResponse.json({ query, count: searchResults.length, results: searchResults });
     }
 
     const memories = await memoryService.retrieve({
@@ -61,7 +87,31 @@ export async function GET(request: NextRequest) {
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
-    const { memoryType, key, summary, content, confidence, tenancyId } = body;
+    const { action, memoryType, key, summary, content, confidence, tenancyId } = body;
+
+    // Automated Sync trigger: Supabase -> Cognee
+    if (action === 'sync_cognee' || action === 'sync_supabase_to_cognee') {
+      const syncResult = await syncSupabaseToCognee({ propertyId: body.propertyId });
+      return NextResponse.json({ success: true, syncResult });
+    }
+
+    // On-demand RAG Evaluation
+    if (action === 'evaluate_rag') {
+      const { query, generatedResponse, contextSnippets, latencyMs } = body;
+      if (!query || !generatedResponse) {
+        return NextResponse.json(
+          { error: 'query and generatedResponse are required for RAG evaluation' },
+          { status: 400 }
+        );
+      }
+      const evalResult = await evaluateRagResponse({
+        query,
+        generatedResponse,
+        contextSnippets: contextSnippets || [],
+        retrievalLatencyMs: latencyMs || 0,
+      });
+      return NextResponse.json({ success: true, evaluation: evalResult });
+    }
 
     if (!memoryType || !summary) {
       return NextResponse.json(
