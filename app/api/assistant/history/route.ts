@@ -3,6 +3,8 @@ import { getAuthenticatedUser } from '@/lib/auth/rbac';
 import prisma from '@/lib/db';
 import { UserRole } from '@prisma/client';
 
+export const dynamic = 'force-dynamic';
+
 export async function GET(req: NextRequest) {
   try {
     let authContext = await getAuthenticatedUser();
