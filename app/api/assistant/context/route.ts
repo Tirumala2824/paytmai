@@ -4,6 +4,8 @@ import prisma from '@/lib/db';
 import { UserRole } from '@prisma/client';
 import { isGeminiConfigured, getGeminiModelName, SUPPORTED_GEMINI_MODELS } from '@/lib/ai/llm';
 
+export const dynamic = 'force-dynamic';
+
 export async function GET(req: NextRequest) {
   try {
     let authContext = await getAuthenticatedUser();
