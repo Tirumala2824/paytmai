@@ -3,6 +3,8 @@ import prisma from '@/lib/db';
 import { createAuditEvent } from '@/lib/audit/service';
 import { advanceRentalLifecycle } from '@/lib/rental/service';
 import { memoryService } from '@/lib/ai/memory/service';
+import { getNotificationProvider } from '@/lib/adapters/notifications';
+import { getMaintenanceProvider } from '@/lib/adapters/maintenance';
 
 export interface ReportIssueParams {
   tenancyId: string;
@@ -171,14 +173,14 @@ export async function notifyOwnerForIssue(params: {
 
   const ownerProfileId = issue.property.owner.userProfile.id;
 
-  const notification = await prisma.notification.create({
-    data: {
-      userProfileId: ownerProfileId,
-      title: params.urgent ? `⚠️ URGENT Maintenance: ${issue.title}` : `Maintenance Update: ${issue.title}`,
-      message: params.message,
-      type: 'MAINTENANCE_UPDATE',
-      link: '/maintenance',
-    },
+  const notificationProvider = getNotificationProvider();
+  const notifResult = await notificationProvider.send({
+    recipientUserProfileId: ownerProfileId,
+    title: params.urgent ? `⚠️ URGENT Maintenance: ${issue.title}` : `Maintenance Update: ${issue.title}`,
+    message: params.message,
+    type: 'MAINTENANCE_UPDATE',
+    link: '/maintenance',
+    urgent: params.urgent,
   });
 
   // Transition status to OWNER_NOTIFIED if currently ISSUE_REPORTED or CLASSIFIED
@@ -198,8 +200,10 @@ export async function notifyOwnerForIssue(params: {
     action: 'OWNER_NOTIFIED',
     resourceType: 'MAINTENANCE_ISSUE',
     resourceId: issue.id,
+    tool: 'notifyOwner',
+    status: 'SUCCESS',
     metadata: {
-      notificationId: notification.id,
+      notificationId: notifResult.notificationId,
       message: params.message,
       urgent: params.urgent,
       previousStatus: issue.status,
@@ -207,7 +211,7 @@ export async function notifyOwnerForIssue(params: {
     },
   });
 
-  return { notification, issueStatus: MaintenanceStatus.OWNER_NOTIFIED };
+  return { notificationId: notifResult.notificationId, issueStatus: MaintenanceStatus.OWNER_NOTIFIED };
 }
 
 /**
@@ -264,6 +268,8 @@ export async function assignMaintenanceTask(params: {
     action: 'MAINTENANCE_TASK_ASSIGNED',
     resourceType: 'MAINTENANCE_TASK',
     resourceId: task.id,
+    tool: 'assignMaintenanceTask',
+    status: 'SUCCESS',
     metadata: {
       issueId: params.issueId,
       assignedTo: params.assignedTo,
@@ -272,6 +278,58 @@ export async function assignMaintenanceTask(params: {
   });
 
   return task;
+}
+
+/**
+ * Simulates completion of technician repair work for demo and hackathon flow.
+ */
+export async function simulateRepairForIssue(params: {
+  issueId: string;
+  resolution?: string;
+  actualCost?: number;
+  actor: { id: string; role: string };
+}) {
+  const provider = getMaintenanceProvider();
+  const res = await provider.simulateRepair({
+    issueId: params.issueId,
+    resolution:
+      params.resolution ||
+      'Technician completed repair: AC filter cleaned, gas pressure recharged, cooling verified at 18°C',
+    actualCost: params.actualCost || 1200,
+  });
+
+  const issue = await prisma.maintenanceIssue.findUnique({
+    where: { id: params.issueId },
+  });
+
+  if (issue?.tenancyId) {
+    try {
+      await advanceRentalLifecycle(
+        issue.tenancyId,
+        RentalLifecycle.FIXED,
+        params.actor,
+        `Technician completed repair: ${res.resolution}`
+      );
+    } catch (err) {
+      console.warn('Could not advance lifecycle to FIXED:', err);
+    }
+  }
+
+  await createAuditEvent({
+    actorId: params.actor.id,
+    actorRole: params.actor.role,
+    action: 'MAINTENANCE_REPAIR_SIMULATED',
+    resourceType: 'MAINTENANCE_ISSUE',
+    resourceId: params.issueId,
+    tool: 'simulateRepair',
+    status: 'SUCCESS',
+    metadata: {
+      resolution: res.resolution,
+      status: MaintenanceStatus.FIXED,
+    },
+  });
+
+  return res;
 }
 
 /**

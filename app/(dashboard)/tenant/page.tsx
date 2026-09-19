@@ -9,6 +9,7 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { RentalLifecycle, PaymentStatus, MaintenanceStatus } from '@prisma/client';
 import { formatCurrency, formatDate } from '@/lib/utils';
+import Link from 'next/link';
 import {
   CreditCard,
   Wrench,
@@ -20,6 +21,9 @@ import {
   ArrowUpRight,
   ShieldCheck,
   Send,
+  Bell,
+  Mic,
+  MessageSquare,
 } from 'lucide-react';
 
 export default function TenantDashboard() {
@@ -535,6 +539,103 @@ export default function TenantDashboard() {
             >
               + Log New Issue
             </Button>
+          </CardFooter>
+        </Card>
+      </div>
+
+      {/* Grid: Notifications & AI Assistant */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        {/* Notifications Feed */}
+        <Card className="border-slate-800 bg-slate-900/60">
+          <CardHeader className="flex flex-row items-center justify-between pb-2">
+            <div>
+              <CardTitle className="text-base text-white flex items-center gap-2">
+                <Bell className="h-4 w-4 text-indigo-400" />
+                Notifications &amp; Alerts
+              </CardTitle>
+              <CardDescription className="text-xs">
+                Real-time updates on rent, maintenance, and owner messages
+              </CardDescription>
+            </div>
+            <Badge className="bg-indigo-500/20 text-indigo-300 border-indigo-500/30 text-[10px]">
+              2 Unread
+            </Badge>
+          </CardHeader>
+          <CardContent className="space-y-3 pt-2">
+            <div className="p-3 rounded-xl bg-slate-950/60 border border-slate-800 flex items-start gap-3">
+              <div className="h-2 w-2 rounded-full bg-indigo-400 mt-1.5 shrink-0" />
+              <div className="space-y-1 flex-1 text-xs">
+                <div className="flex items-center justify-between">
+                  <span className="font-semibold text-white">Rent Schedule Generated</span>
+                  <span className="text-[10px] text-slate-500">01 Sep 2026</span>
+                </div>
+                <p className="text-slate-400">
+                  September 2026 rent of ₹18,000 is due by 05 Sep 2026.
+                </p>
+              </div>
+            </div>
+
+            <div className="p-3 rounded-xl bg-slate-950/60 border border-slate-800 flex items-start gap-3">
+              <div className="h-2 w-2 rounded-full bg-emerald-400 mt-1.5 shrink-0" />
+              <div className="space-y-1 flex-1 text-xs">
+                <div className="flex items-center justify-between">
+                  <span className="font-semibold text-white">Payment Confirmed</span>
+                  <span className="text-[10px] text-slate-500">04 Aug 2026</span>
+                </div>
+                <p className="text-slate-400">
+                  ₹18,000 received for August 2026. Receipt TXN_PAYTM_98234710 generated.
+                </p>
+              </div>
+            </div>
+          </CardContent>
+          <CardFooter className="text-xs text-slate-500 flex justify-between">
+            <span>Powered by MockNotificationProvider</span>
+            <Link href="/notifications" className="text-indigo-400 hover:underline">
+              View All Alerts &rarr;
+            </Link>
+          </CardFooter>
+        </Card>
+
+        {/* AI Assistant Quick Launcher */}
+        <Card className="border-indigo-900/40 bg-gradient-to-br from-indigo-950/40 via-slate-900 to-slate-950">
+          <CardHeader className="flex flex-row items-center justify-between pb-2">
+            <div>
+              <CardTitle className="text-base text-white flex items-center gap-2">
+                <Sparkles className="h-4 w-4 text-indigo-400" />
+                HavenDex AI Assistant
+              </CardTitle>
+              <CardDescription className="text-xs">
+                &quot;One AI teammate for your entire rental relationship&quot;
+              </CardDescription>
+            </div>
+            <Badge className="bg-indigo-600/30 text-indigo-300 border-indigo-500/40 text-[10px]">
+              Active
+            </Badge>
+          </CardHeader>
+          <CardContent className="space-y-3 pt-2 text-xs">
+            <p className="text-slate-300 leading-relaxed">
+              HavenDex understands your rental context, checks payment status, logs maintenance, alerts your owner, and dispatches technicians autonomously.
+            </p>
+            <div className="p-3 rounded-xl bg-slate-950/80 border border-slate-800 text-[11px] text-indigo-200 italic">
+              &ldquo;My rent is paid. Please confirm it and tell the owner that my AC isn&apos;t working again.&rdquo;
+            </div>
+            <div className="flex flex-wrap gap-2 pt-1">
+              <Link href="/assistant">
+                <Button size="sm" className="bg-indigo-600 hover:bg-indigo-500 text-white text-xs gap-1.5 shadow-md shadow-indigo-600/20">
+                  <Mic className="h-3.5 w-3.5" />
+                  <span>Launch Voice Assistant</span>
+                </Button>
+              </Link>
+              <Link href="/assistant">
+                <Button variant="outline" size="sm" className="border-slate-700 text-xs gap-1.5">
+                  <MessageSquare className="h-3.5 w-3.5 text-indigo-400" />
+                  <span>Open Text Chat</span>
+                </Button>
+              </Link>
+            </div>
+          </CardContent>
+          <CardFooter className="text-[11px] text-slate-500">
+            Supports Indian English, Hindi, and 8 regional languages via Sarvam AI
           </CardFooter>
         </Card>
       </div>

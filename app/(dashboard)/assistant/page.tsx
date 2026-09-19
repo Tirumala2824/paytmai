@@ -25,6 +25,7 @@ import {
 import { AIExecutionResponse, ExecutionStep } from '@/lib/ai/types';
 import { LIFECYCLE_STAGE_LABELS } from '@/lib/rental/lifecycle';
 import { VoiceAssistant } from '@/components/voice/VoiceAssistant';
+import { LiveAgentTimeline } from '@/components/voice/LiveAgentTimeline';
 import { Mic, MessageSquare } from 'lucide-react';
 
 interface ChatMessage {
@@ -67,6 +68,7 @@ export default function AssistantPage() {
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   const suggestedCommands = [
+    "My rent is paid. Please confirm it and tell the owner that my AC isn't working again.",
     'Is my rent paid?',
     'My rent is due when?',
     "My AC isn't working.",
