@@ -59,7 +59,7 @@ export default async function DashboardLayout({
           unreadNotifications={2}
         />
 
-        <main className="flex-1 p-6 md:p-8 max-w-7xl w-full mx-auto space-y-6">
+        <main className="flex-1 p-4 md:p-8 max-w-7xl w-full mx-auto space-y-6 pb-20 md:pb-8">
           {children}
         </main>
       </div>
